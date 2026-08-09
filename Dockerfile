@@ -25,7 +25,9 @@ ENV BOOK_PATH=/data/client_book.json \
     MARKET_PATH=/data/market_data.json \
     LLM_BASE_URL=http://localhost:8600/v1 \
     LLM_API_KEY=test \
-    PORT=8080
+    PORT=8080 \
+    AGNO_TELEMETRY=false
+
 
 EXPOSE 8080
 
