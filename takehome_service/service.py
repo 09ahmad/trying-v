@@ -154,7 +154,7 @@ class AnswerService:
         combined_answer = sanitize_text(" ".join(texts))
 
         all_citations: List[str] = []
-        for r in good:
+        for r in results:
             for c in (r.get("citations") or []):
                 if c and c not in all_citations:
                     all_citations.append(c)
