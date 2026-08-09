@@ -432,6 +432,16 @@ class BookAgent:
 
         snapshot = self._loader.get_positions_snapshot(client_id)
         pos = next((p for p in snapshot if p.get("symbol") == symbol), None)
+        calc_qty, txn_cited = self._loader.compute_holdings(client_id, symbol)
+
+        if pos and txn_cited:
+            snap_qty = _parse_decimal(pos.get("quantity") or 0)
+            if abs(snap_qty - calc_qty) > 1e-4:
+                pos_id = pos.get("id", "")
+                conflict_citations = [pos_id] + txn_cited
+                text = f"There is a conflict in the records: positions snapshot shows {snap_qty:.4f} shares of {symbol}, while transaction history calculates {calc_qty:.4f} shares."
+                return self._build_conflict(text, conflict_citations, client_id=client_id)
+
         if pos:
             qty = _parse_decimal(pos.get("quantity") or 0)
             val_str = f"{qty:.4f}"
@@ -521,6 +531,23 @@ class BookAgent:
             "citations": format_citations(client_id, citations),
             "confidence": 0.85,
             "flags": flags or [],
+        }
+
+    def _build_conflict(
+        self,
+        answer: str,
+        citations: List[str],
+        client_id: str = "",
+    ) -> Dict[str, Any]:
+        return {
+            "answer": sanitize_text(answer),
+            "answer_value": None,
+            "abstained": False,
+            "refused": False,
+            "reason": None,
+            "citations": format_citations(client_id, citations),
+            "confidence": 0.85,
+            "flags": ["conflict"],
         }
 
     def _abstain(self, reason: str) -> Dict[str, Any]:

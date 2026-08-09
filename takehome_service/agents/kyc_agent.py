@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 from agno.agent import Agent
 from agno.models.openai import OpenAIChat
 
-from takehome_service.data import DataLoader, mask_sensitive, mask_in_text, format_citations
+from takehome_service.data import DataLoader, mask_sensitive, mask_in_text, format_citations, sanitize_text
 
 
 class KYCProfileAgent:
@@ -60,18 +60,35 @@ class KYCProfileAgent:
 
         # --- Risk profile ---
         if re.search(r"\b(risk\s+profile|risk\s+appetite|risk\s+tolerance|risk\s+rating)\b", prompt_lower):
-            risk = kyc.get("risk_profile") or kyc.get("risk_rating")
-            if risk:
-                text = self._llm_format(f"The risk profile on file is {risk}.", prompt)
-                return self._build(text, str(risk), [kyc_id])
+            kyc_risk = kyc.get("risk_profile") or kyc.get("risk_rating")
+            client_dict = self._loader._clients_by_id.get(client_id, {})
+            suitability = client_dict.get("suitability_reviews") or []
+            if kyc_risk and suitability and suitability[-1].get("risk_profile"):
+                rev_risk = suitability[-1]["risk_profile"]
+                if kyc_risk.lower() != rev_risk.lower():
+                    rev_id = suitability[-1].get("id", "")
+                    text = f"There is a conflict in the records: KYC lists risk profile as {kyc_risk}, while suitability review {rev_id} lists it as {rev_risk}."
+                    return self._build_conflict(text, [kyc_id, rev_id], client_id)
+            if kyc_risk:
+                text = self._llm_format(f"The risk profile on file is {kyc_risk}.", prompt)
+                return self._build(text, str(kyc_risk), [kyc_id], client_id=client_id)
             return self._abstain("Risk profile is not recorded in the KYC data.")
 
         # --- KYC status ---
         if re.search(r"\b(kyc\s+status|kyc\s+complete|verification\s+status|good\s+standing)\b", prompt_lower):
             status = kyc.get("kyc_status")
+            notes = self._loader.get_notes(client_id)
+            pending_note = next(
+                (n for n in notes if "re-verification is pending" in str(n.get("text", "")).lower() or "expired" in str(n.get("text", "")).lower()),
+                None,
+            )
+            if status and pending_note:
+                note_id = pending_note.get("id", "")
+                text = f"There is a conflict in the records: KYC status is marked as {status}, but note {note_id} indicates KYC re-verification is pending."
+                return self._build_conflict(text, [kyc_id, note_id], client_id)
             if status:
                 text = self._llm_format(f"The KYC status is {status}.", prompt)
-                return self._build(text, str(status), [kyc_id])
+                return self._build(text, str(status), [kyc_id], client_id=client_id)
             return self._abstain("KYC status is not recorded for this client.")
 
         # --- PAN (always masked as ****XXXX) ---
@@ -174,6 +191,20 @@ class KYCProfileAgent:
             "citations": format_citations(client_id, citations),
             "confidence": 0.9,
             "flags": [],
+        }
+
+    def _build_conflict(
+        self, answer: str, citations: List[str], client_id: str = ""
+    ) -> Dict[str, Any]:
+        return {
+            "answer": sanitize_text(answer),
+            "answer_value": None,
+            "abstained": False,
+            "refused": False,
+            "reason": None,
+            "citations": format_citations(client_id, citations),
+            "confidence": 0.85,
+            "flags": ["conflict"],
         }
 
     def _abstain(self, reason: str) -> Dict[str, Any]:
