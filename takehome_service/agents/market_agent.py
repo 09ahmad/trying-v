@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 from agno.agent import Agent
 from agno.models.openai import OpenAIChat
 
-from takehome_service.data import DataLoader, sanitize_text
+from takehome_service.data import DataLoader, sanitize_text, format_citations
 
 # Common English words that might be uppercase in prompts
 _EXCLUDED_WORDS = {
@@ -217,7 +217,7 @@ class MarketDeskAgent:
 
         news_items = sorted(news_items, key=lambda n: n.get("date", ""), reverse=True)
         count = len(news_items)
-        news_ids = [n.get("id", "") for n in news_items[:6] if n.get("id")]
+        news_ids = [n.get("id", "") for n in news_items if n.get("id")]
         news_context = "\n".join(
             f"- [{n.get('date')}] {n.get('headline', '')}: {n.get('body', '')}"
             for n in news_items[:5]
@@ -242,7 +242,7 @@ class MarketDeskAgent:
         answer_text = self._llm_format(
             f"Recent news for covered holdings:\n{context}", prompt
         )
-        return self._build(answer_text, str(len(all_news)), news_ids[:6])
+        return self._build(answer_text, str(len(all_news)), news_ids)
 
     def _generic_market_answer(self, symbol: str, prompt: str) -> Dict[str, Any]:
         inst = self._loader.get_instrument(symbol)
@@ -330,7 +330,7 @@ class MarketDeskAgent:
             return precomputed
 
     def _build(
-        self, answer: str, value: Optional[str], citations: List[str]
+        self, answer: str, value: Optional[str], citations: List[str], client_id: str = ""
     ) -> Dict[str, Any]:
         return {
             "answer": sanitize_text(answer),
@@ -338,7 +338,7 @@ class MarketDeskAgent:
             "abstained": False,
             "refused": False,
             "reason": None,
-            "citations": [c for c in citations if c][:6],
+            "citations": format_citations(client_id, citations),
             "confidence": 0.85,
             "flags": [],
         }

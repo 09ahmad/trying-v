@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 from agno.agent import Agent
 from agno.models.openai import OpenAIChat
 
-from takehome_service.data import DataLoader, mask_sensitive, mask_in_text
+from takehome_service.data import DataLoader, mask_sensitive, mask_in_text, format_citations
 
 
 class KYCProfileAgent:
@@ -163,7 +163,7 @@ class KYCProfileAgent:
             return precomputed
 
     def _build(
-        self, answer: str, value: Optional[str], citations: List[str]
+        self, answer: str, value: Optional[str], citations: List[str], client_id: str = ""
     ) -> Dict[str, Any]:
         return {
             "answer": answer,
@@ -171,7 +171,7 @@ class KYCProfileAgent:
             "abstained": False,
             "refused": False,
             "reason": None,
-            "citations": [c for c in citations if c][:6],
+            "citations": format_citations(client_id, citations),
             "confidence": 0.9,
             "flags": [],
         }

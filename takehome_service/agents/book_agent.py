@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from agno.agent import Agent
 from agno.models.openai import OpenAIChat
 
-from takehome_service.data import DataLoader, sanitize_text
+from takehome_service.data import DataLoader, format_citations, sanitize_text
 
 
 MONTH_NAMES = {
@@ -184,7 +184,7 @@ class BookAgent:
             prompt,
             use_deep,
         )
-        return self._build(answer_text, val_str, cited[:6])
+        return self._build(answer_text, val_str, cited, client_id=client_id)
 
     def _largest_deposit(self, client_id: str, prompt: str, use_deep: bool) -> Dict[str, Any]:
         deposits = self._loader.get_transactions(client_id, txn_type="deposit")
@@ -214,14 +214,14 @@ class BookAgent:
         if not filtered and total == 0.0:
             return self._abstain("No deposit transactions found in the specified date range.")
         val_str = f"{total:.2f}"
-        cited = [t.get("id", "") for t in filtered[:6]]
+        cited = [t.get("id", "") for t in filtered]
         answer_text = self._llm_format(
             f"The total amount deposited was {val_str} USD.",
             f"Total deposits: {val_str} USD",
             prompt,
             use_deep,
         )
-        return self._build(answer_text, val_str, cited)
+        return self._build(answer_text, val_str, cited, client_id=client_id)
 
     def _dividend_income(self, client_id: str, prompt: str, use_deep: bool) -> Dict[str, Any]:
         start, end = _parse_date_range(prompt)
@@ -242,14 +242,14 @@ class BookAgent:
         if not dividends:
             return self._abstain("No dividend income found for the requested period/symbol.")
         val_str = f"{total:.2f}"
-        cited = [t.get("id", "") for t in dividends[:6]]
+        cited = [t.get("id", "") for t in dividends]
         answer_text = self._llm_format(
             f"The net dividend income was {val_str} USD.",
             f"Dividend income: {val_str} USD",
             prompt,
             use_deep,
         )
-        return self._build(answer_text, val_str, cited)
+        return self._build(answer_text, val_str, cited, client_id=client_id)
 
     def _total_fees(self, client_id: str, prompt: str, use_deep: bool) -> Dict[str, Any]:
         fees = self._loader.get_transactions(client_id, txn_type="fee")
@@ -257,14 +257,14 @@ class BookAgent:
         if not fees:
             return self._abstain("No fee transactions found for this client.")
         val_str = f"{total:.2f}"
-        cited = [t.get("id", "") for t in fees[:6]]
+        cited = [t.get("id", "") for t in fees]
         answer_text = self._llm_format(
             f"The total platform fees charged are {val_str} USD.",
             f"Total fees: {val_str} USD",
             prompt,
             use_deep,
         )
-        return self._build(answer_text, val_str, cited)
+        return self._build(answer_text, val_str, cited, client_id=client_id)
 
     def _count_txn_type(self, client_id: str, txn_type: str, prompt: str, use_deep: bool) -> Dict[str, Any]:
         start, end = _parse_date_range(prompt)
@@ -292,14 +292,14 @@ class BookAgent:
             txns = [t for t in txns if (self._loader.parse_date(t.get("date", "")) or datetime.min) >= start]
         count = len(txns)
         val_str = str(count)
-        cited = [t.get("id", "") for t in txns[:6]]
+        cited = [t.get("id", "") for t in txns]
         answer_text = self._llm_format(
             f"There were {count} {txn_type} transaction(s).",
             f"Count of {txn_type}: {count}",
             prompt,
             use_deep,
         )
-        return self._build(answer_text, val_str, cited)
+        return self._build(answer_text, val_str, cited, client_id=client_id)
 
     def _first_purchase(self, client_id: str, prompt: str, use_deep: bool) -> Dict[str, Any]:
         symbol = self._loader.find_symbol_in_text(prompt)
@@ -403,12 +403,12 @@ class BookAgent:
                 prompt,
                 use_deep,
             )
-            return self._build(answer_text, val_str, cited[:6])
+            return self._build(answer_text, val_str, cited, client_id=client_id)
 
         snapshot = self._loader.get_positions_snapshot(client_id)
         count = len([p for p in snapshot if p.get("symbol")])
         val_str = str(count)
-        cited = [p.get("id", "") for p in snapshot[:6] if p.get("id")]
+        cited = [p.get("id", "") for p in snapshot if p.get("id")]
         answer_text = self._llm_format(
             f"The account holds {count} positions.",
             f"Holdings count: {count}",
@@ -428,7 +428,7 @@ class BookAgent:
                 prompt,
                 use_deep,
             )
-            return self._build(answer_text, val_str, cited[:6])
+            return self._build(answer_text, val_str, cited, client_id=client_id)
 
         snapshot = self._loader.get_positions_snapshot(client_id)
         pos = next((p for p in snapshot if p.get("symbol") == symbol), None)
@@ -442,7 +442,7 @@ class BookAgent:
                 prompt,
                 use_deep,
             )
-            return self._build(answer_text, val_str, cited)
+            return self._build(answer_text, val_str, cited, client_id=client_id)
 
         qty, cited = self._loader.compute_holdings(client_id, symbol)
         if qty == 0.0 and not cited:
@@ -454,7 +454,7 @@ class BookAgent:
             prompt,
             use_deep,
         )
-        return self._build(answer_text, val_str, cited[:6])
+        return self._build(answer_text, val_str, cited, client_id=client_id)
 
     def _fallback(self, client_id: str, prompt: str, use_deep: bool) -> Dict[str, Any]:
         txns = self._loader.get_transactions(client_id)
@@ -510,6 +510,7 @@ class BookAgent:
         value: Optional[str],
         citations: List[str],
         flags: Optional[List[str]] = None,
+        client_id: str = "",
     ) -> Dict[str, Any]:
         return {
             "answer": sanitize_text(answer),
@@ -517,7 +518,7 @@ class BookAgent:
             "abstained": False,
             "refused": False,
             "reason": None,
-            "citations": [c for c in citations if c][:6],
+            "citations": format_citations(client_id, citations),
             "confidence": 0.85,
             "flags": flags or [],
         }

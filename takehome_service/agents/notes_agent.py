@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 from agno.agent import Agent
 from agno.models.openai import OpenAIChat
 
-from takehome_service.data import DataLoader, detect_injection, sanitize_text
+from takehome_service.data import DataLoader, detect_injection, sanitize_text, format_citations
 
 
 class NotesDeskAgent:
@@ -75,7 +75,7 @@ class NotesDeskAgent:
         # --- Summary ---
         if re.search(r"\b(summar|overview|what\s+(are|do)\s+the\s+notes)\b", prompt_lower):
             answer_text = self._llm_format_with_context(safe_notes_text, prompt, injection_detected)
-            return self._build(answer_text, None, note_ids[:6])
+            return self._build(answer_text, None, note_ids, client_id=client_id)
 
         # --- Outstanding actions ---
         if re.search(r"\b(outstanding|actions?|follow.ups?|tasks?|to.do)\b", prompt_lower):
@@ -86,10 +86,10 @@ class NotesDeskAgent:
             if not action_notes:
                 # Return general notes summary if no specific action tag
                 answer_text = self._llm_format_with_context(safe_notes_text, prompt, injection_detected)
-                return self._build(answer_text, None, note_ids[:6])
+                return self._build(answer_text, None, note_ids, client_id=client_id)
             context = self._build_safe_context(action_notes, injection_detected)
             answer_text = self._llm_format_with_context(context, prompt, injection_detected)
-            return self._build(answer_text, None, [n.get("id", "") for n in action_notes[:6]])
+            return self._build(answer_text, None, [n.get("id", "") for n in action_notes], client_id=client_id)
 
         # --- Last meeting / recent interaction ---
         if re.search(r"\b(last\s+(meeting|call|interaction|review)|most\s+recent\s+note)\b", prompt_lower):
@@ -104,7 +104,7 @@ class NotesDeskAgent:
                 return self._build(answer_text, None, [latest.get("id", "")])
 
         answer_text = self._llm_format_with_context(safe_notes_text, prompt, injection_detected)
-        return self._build(answer_text, None, note_ids[:6])
+        return self._build(answer_text, None, note_ids, client_id=client_id)
 
     def _build_safe_context(self, notes: List[Dict], injection_detected: bool) -> str:
         parts = []
@@ -144,7 +144,7 @@ class NotesDeskAgent:
             return sanitize_text(precomputed)
 
     def _build(
-        self, answer: str, value: Optional[str], citations: List[str]
+        self, answer: str, value: Optional[str], citations: List[str], client_id: str = ""
     ) -> Dict[str, Any]:
         return {
             "answer": sanitize_text(answer),
@@ -152,7 +152,7 @@ class NotesDeskAgent:
             "abstained": False,
             "refused": False,
             "reason": None,
-            "citations": [c for c in citations if c][:6],
+            "citations": format_citations(client_id, citations),
             "confidence": 0.85,
             "flags": [],
         }

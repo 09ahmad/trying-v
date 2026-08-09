@@ -47,6 +47,22 @@ def mask_in_text(text: str, value: str) -> str:
     return text.replace(value, masked)
 
 
+def format_citations(client_id: str, record_ids: List[str]) -> List[str]:
+    """Format citations according to >6-records rule from TAKE_HOME_BRIEF:
+    If an answer rests on more than six records, cite the client_id instead of listing them.
+    """
+    seen: Set[str] = set()
+    clean: List[str] = []
+    for r in record_ids:
+        if r and isinstance(r, str) and r not in seen:
+            seen.add(r)
+            clean.append(r)
+    if len(clean) > 6:
+        return [client_id] if client_id else clean[:6]
+    return clean
+
+
+
 # ---------------------------------------------------------------------------
 # Injection detection and canary sanitization
 # ---------------------------------------------------------------------------
@@ -379,7 +395,7 @@ class DataLoader:
         if total_mv <= 0:
             return None
 
-        cited = [p.get("id", "") for p in snapshot[:6] if p.get("id")]
+        cited = [p.get("id", "") for p in snapshot if p.get("id")]
         if suitability[-1].get("id"):
             cited.append(suitability[-1]["id"])
         drift = 0.0

@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
-from takehome_service.data import DataLoader, sanitize_text
+from takehome_service.data import DataLoader, sanitize_text, format_citations
 
 
 # PAN / account patterns that should never appear unmasked
@@ -90,7 +90,7 @@ class VerifierAgent:
                     break
             if not is_foreign:
                 safe_citations.append(c)
-        verified["citations"] = safe_citations[:6]
+        verified["citations"] = format_citations(client_id, safe_citations)
 
         return verified
 

@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional, Sequence
 
-from takehome_service.data import DataLoader, sanitize_text
+from takehome_service.data import DataLoader, sanitize_text, format_citations
 from takehome_service.llm_client import BlackoutError
 from takehome_service.router import AgentRouter
 from takehome_service.agents.book_agent import BookAgent
@@ -117,7 +117,7 @@ class AnswerService:
         elif len(specialist_results) == 1:
             combined = specialist_results[0]
         else:
-            combined = self._combine(specialist_results)
+            combined = self._combine(specialist_results, client_id=client_id)
 
         # Step 5: Add upstream_issue flag if there was a partial blackout
         if blackout_encountered and specialist_results:
@@ -144,7 +144,7 @@ class AnswerService:
     # Combine multiple specialist answers
     # -----------------------------------------------------------------------
 
-    def _combine(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _combine(self, results: List[Dict[str, Any]], client_id: str = "") -> Dict[str, Any]:
         """Merge answers from multiple specialists for multi-agent questions."""
         good = [r for r in results if not r.get("abstained") and not r.get("refused")]
         if not good:
@@ -181,7 +181,7 @@ class AnswerService:
             "abstained": False,
             "refused": False,
             "reason": None,
-            "citations": all_citations[:6],
+            "citations": format_citations(client_id, all_citations),
             "confidence": min(1.0, conf),
             "flags": all_flags,
         }
