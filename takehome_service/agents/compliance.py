@@ -24,12 +24,14 @@ from takehome_service.data import DataLoader
 # Advice-detection patterns (two distinct code paths, not fuzzy)
 _ADVICE_PATTERNS = [
     re.compile(r"\bshould\s+i\b", re.I),
-    re.compile(r"\bwould\s+you\s+(recommend|suggest|advise)\b", re.I),
+    re.compile(r"\bwould\s+you\s+(recommend|suggest|advise|tell)\b", re.I),
     re.compile(r"\b(recommend|recommendation|advice|advise)\b", re.I),
     re.compile(r"\b(good\s+time|right\s+time)\s+to\s+(buy|sell|invest)\b", re.I),
-    re.compile(r"\bshould\s+(the\s+client|they|he|she|i)\s+(buy|sell|invest|move|switch|exit|reduce|increase|add)\b", re.I),
-    re.compile(r"\b(buy\s+more|sell\s+(out|off)|move\s+into|exit\s+(the|this|my))\b", re.I),
-    re.compile(r"\bwhat\s+should\s+(my|the|their)\s+(allocation|portfolio|position)\s+be\b", re.I),
+    re.compile(r"\bshould\s+([\w\s]+?)\s+(buy|sell|invest|move|switch|exit|reduce|increase|add)\b", re.I),
+    re.compile(r"\b(buy\s+more|sell\s+(out|off)|move\s+into|exit\s+(the|this|my)|put\s+(more\s+)?money\s+into)\b", re.I),
+    re.compile(r"\bwhat\s+should\s+([\w\s']+?)\s+(new\s+)?(target\s+)?(allocation|portfolio|position)\s+be\b", re.I),
+    re.compile(r"\bwhat\s+(target|allocation)\s+should\b", re.I),
+    re.compile(r"\b(tell|advise)\s+[\w\s]+\s+to\s+(put|invest|buy|sell|move|transfer)\b", re.I),
 ]
 
 # Household / fake-override patterns
