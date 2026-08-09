@@ -64,16 +64,26 @@ def _parse_date_from_text(text: str) -> Optional[datetime]:
 
 
 def _parse_date_range(prompt: str) -> Tuple[Optional[datetime], Optional[datetime]]:
-    m = re.search(r"between\s+(.+?)\s+and\s+(.+?)(?:\s*\.|\s*$)", prompt, re.I)
+    m = re.search(r"between\s+(.+?)\s+and\s+(.+?)(?:\s+inclusive|\s*\.|\s*,|\s*$)", prompt, re.I)
     if m:
         start = _parse_date_from_text(m.group(1))
         end = _parse_date_from_text(m.group(2))
+        if end:
+            end = end.replace(hour=23, minute=59, second=59)
         return start, end
+    yr_m = re.search(r"\b(?:during|in)\s+(202\d)\b", prompt, re.I)
+    if yr_m:
+        yr = int(yr_m.group(1))
+        return datetime(yr, 1, 1), datetime(yr, 12, 31, 23, 59, 59)
     as_of_match = re.search(r"(?:as\s+at|as\s+of|on\s+or\s+before|predat\w+)\s+(.+?)(?:\s*\.|\s*,|\s*$)", prompt, re.I)
     if as_of_match:
         end = _parse_date_from_text(as_of_match.group(1))
+        if end:
+            end = end.replace(hour=23, minute=59, second=59)
         return None, end
     single = _parse_date_from_text(prompt)
+    if single:
+        single = single.replace(hour=23, minute=59, second=59)
     return None, single
 
 
@@ -135,7 +145,7 @@ class BookAgent:
         if re.search(r"\b(largest|biggest)\s+(?:single\s+|one-off\s+)?(deposit|funding)\b", prompt_lower):
             return self._largest_deposit(client_id, prompt, use_deep)
 
-        if re.search(r"\b(total\s+deposit\w*|funded\s+between|funded\s+in\s+total|sum\s+of\s+deposits?)\b", prompt_lower):
+        if re.search(r"\b(total\s+deposit\w*|funded\s+between|funded\s+in\s+total|sum\s+of\s+deposits?|deposit\w*\s+(in\s+total|total)|deposit\w*.*in\s+total)\b", prompt_lower):
             return self._total_deposits(client_id, prompt, use_deep)
 
         if re.search(r"\bdividend\w*\b", prompt_lower):
@@ -153,7 +163,7 @@ class BookAgent:
         if re.search(r"\b(first|earliest)\s+(buy\w*|purchas\w*|bought|investment)\b", prompt_lower):
             return self._first_purchase(client_id, prompt, use_deep)
 
-        if re.search(r"\b(drift\w*|target\s+allocation|rebalance\w*|overweight|underweight|away\s+from)\b", prompt_lower):
+        if re.search(r"\b(drift\w*|target\s+allocation|recorded\s+target|target.*weight|weight\s+stand|rebalance\w*|overweight|underweight|away\s+from)\b", prompt_lower):
             return self._target_drift(client_id, prompt, use_deep)
 
         if re.search(r"\b(sector\w*|proportion\w*|concentrat\w*|percentage\s+of.*portfolio|exposure)\b", prompt_lower):

@@ -40,7 +40,7 @@ _BOOK_QA_PATTERNS = [
     re.compile(r"\b(largest|biggest|highest|total|sum|aggregate)\b", re.I),
     re.compile(r"\b(fee|fees|dividend|dividends|payroll|funding)\b", re.I),
     re.compile(r"\b(first\s+(buy|purchase|bought|investment))\b", re.I),
-    re.compile(r"\b(target\s+allocation|drift|rebalance)\b", re.I),
+    re.compile(r"\b(target\s+allocation|recorded\s+target|target.*weight|weight\s+stand|drift|rebalance|overweight|underweight|mandate)\b", re.I),
     re.compile(r"\b(shares?\s+(of|in)|units?\s+(of|in))\b", re.I),
 ]
 

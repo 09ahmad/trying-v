@@ -105,7 +105,7 @@ class MarketDeskAgent:
             return self._return_answer(symbol, prompt, prompt_lower)
 
         # 7. News
-        if re.search(r"\b(news|headline|announcement|articles?|reports?)\b", prompt_lower):
+        if re.search(r"\b(news|headline|announcement|articles?|reports?|published|published\s+by|items?)\b", prompt_lower):
             if symbol:
                 return self._news_answer(symbol, prompt)
             covered = self._loader.get_client_covered_symbols(client_id)
