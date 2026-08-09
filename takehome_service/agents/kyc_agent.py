@@ -175,7 +175,9 @@ class KYCProfileAgent:
                 f"Rephrase the answer clearly. Do not change any values. Return only the answer."
             )
             content = run_output.get_content_as_string() if run_output else ""
-            return content.strip() if content else precomputed
+            if not content or "STUB-GATEWAY" in content:
+                return precomputed
+            return sanitize_text(content.strip())
         except Exception:
             return precomputed
 

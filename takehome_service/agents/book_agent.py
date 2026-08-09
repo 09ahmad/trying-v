@@ -517,7 +517,15 @@ class BookAgent:
         try:
             run_output = agent.run(msg)
             content = run_output.get_content_as_string() if run_output else ""
-            return sanitize_text(content.strip()) if content else precomputed_answer
+            if not content or "STUB-GATEWAY" in content:
+                return precomputed_answer
+            numbers = re.findall(r"-?\d+(?:\.\d+)?", data_summary)
+            if numbers:
+                for num in numbers:
+                    clean_num = num.lstrip("-")
+                    if clean_num not in content and clean_num.replace(".", "") not in content.replace(",", "").replace(".", ""):
+                        return precomputed_answer
+            return sanitize_text(content.strip())
         except Exception:
             return precomputed_answer
 

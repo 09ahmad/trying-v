@@ -325,9 +325,17 @@ class MarketDeskAgent:
                 f"Rephrase clearly. Do not change values or add your own knowledge."
             )
             content = run_output.get_content_as_string() if run_output else ""
-            return sanitize_text(content.strip()) if content else precomputed
+            if not content or "STUB-GATEWAY" in content:
+                return sanitize_text(precomputed)
+            numbers = re.findall(r"-?\d+(?:\.\d+)?", precomputed)
+            if numbers:
+                for num in numbers:
+                    clean_num = num.lstrip("-")
+                    if clean_num not in content and clean_num.replace(".", "") not in content.replace(",", "").replace(".", ""):
+                        return sanitize_text(precomputed)
+            return sanitize_text(content.strip())
         except Exception:
-            return precomputed
+            return sanitize_text(precomputed)
 
     def _build(
         self, answer: str, value: Optional[str], citations: List[str], client_id: str = ""
