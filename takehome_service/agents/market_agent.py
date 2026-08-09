@@ -18,7 +18,15 @@ from typing import Any, Dict, List, Optional
 from agno.agent import Agent
 from agno.models.openai import OpenAIChat
 
-from takehome_service.data import DataLoader
+from takehome_service.data import DataLoader, sanitize_text
+
+# Common English words that might be uppercase in prompts
+_EXCLUDED_WORDS = {
+    "WHAT", "WITH", "THEN", "FROM", "THAT", "THIS", "HAVE", "WHEN",
+    "THEY", "YOUR", "ALSO", "SOME", "HERE", "WERE", "WILL", "ONLY",
+    "READ", "DATE", "PULL", "LOOK", "WORK", "GIVE", "TELL", "FIND",
+    "CHECK", "SHOW", "TAKE", "MAKE", "LIST", "VIEW", "SAME", "INFO",
+}
 
 
 class MarketDeskAgent:
@@ -46,15 +54,33 @@ class MarketDeskAgent:
         )
 
     def answer(self, payload: Dict[str, Any], use_deep: bool = False) -> Dict[str, Any]:
-        """Answer a market data question."""
         prompt = payload.get("prompt", "")
         client_id = payload.get("client_id", "")
         prompt_lower = prompt.lower()
 
-        # Extract symbol from prompt
+        # 1. Detect any potential symbol in prompt
         symbol = self._loader.find_symbol_in_text(prompt)
 
-        # --- Coverage check: must come FIRST, before any other lookup ---
+        # If no covered symbol found, scan for any capital ticker candidate e.g. WMT, PFE
+        if not symbol:
+            words = re.findall(r"\b[A-Z]{2,5}\b", prompt)
+            for w in words:
+                if w not in _EXCLUDED_WORDS:
+                    # Potential uncovered symbol mentioned!
+                    if not self._loader.is_covered(w):
+                        return self._abstain(
+                            f"{w} is not in the covered symbols dataset. "
+                            f"No market data, price, sector, or news is available."
+                        )
+
+        # 2. Mandatory coverage check for detected symbol
+        if symbol and not self._loader.is_covered(symbol):
+            return self._abstain(
+                f"{symbol} is not in the covered symbols dataset. "
+                f"No market data, price, sector, or news is available."
+            )
+
+        # 3. Coverage query explicitly
         if re.search(r"\b(covered|coverage|data\s+available|in\s+your\s+coverage)\b", prompt_lower):
             if symbol:
                 if self._loader.is_covered(symbol):
@@ -63,41 +89,32 @@ class MarketDeskAgent:
                         "covered",
                         [symbol],
                     )
-                return self._abstain(
-                    f"{symbol} is not in the covered symbols list. "
-                    f"No price, sector, or news data is available for this instrument."
-                )
+                return self._abstain(f"{symbol} is not in the covered symbols list.")
             return self._abstain("No symbol was identified in the coverage question.")
 
-        # --- Sector / industry ---
+        # 4. Sector / industry
         if re.search(r"\b(sector|industry|asset\s+class)\b", prompt_lower) and symbol:
             return self._sector_answer(symbol, prompt)
 
-        # --- Price / close ---
+        # 5. Price / close
         if re.search(r"\b(close|closing|price|worth|value)\b", prompt_lower) and symbol:
             return self._price_answer(symbol, prompt, prompt_lower)
 
-        # --- Return / performance ---
+        # 6. Return / performance
         if re.search(r"\b(return|performance|gain|loss|percentage\s+change|grew|fell|rose)\b", prompt_lower) and symbol:
             return self._return_answer(symbol, prompt, prompt_lower)
 
-        # --- News ---
+        # 7. News
         if re.search(r"\b(news|headline|announcement|articles?|reports?)\b", prompt_lower):
             if symbol:
                 return self._news_answer(symbol, prompt)
-            # Client-scoped news: find their covered holdings
             covered = self._loader.get_client_covered_symbols(client_id)
             if covered:
                 return self._multi_news_answer(covered, prompt)
             return self._abstain("No covered symbols found for this client to retrieve news for.")
 
-        # --- Generic market question with symbol ---
+        # 8. Generic market question with symbol
         if symbol:
-            if not self._loader.is_covered(symbol):
-                return self._abstain(
-                    f"{symbol} is not in the covered dataset. "
-                    f"No price, sector, or news is available for this instrument."
-                )
             return self._generic_market_answer(symbol, prompt)
 
         return self._abstain("No covered instrument symbol was identified in the market question.")
@@ -107,12 +124,8 @@ class MarketDeskAgent:
     # -----------------------------------------------------------------------
 
     def _sector_answer(self, symbol: str, prompt: str) -> Dict[str, Any]:
-        """Answer a sector/industry question for a symbol."""
         if not self._loader.is_covered(symbol):
-            return self._abstain(
-                f"{symbol} is not in the covered dataset. "
-                f"Sector and industry information is not available."
-            )
+            return self._abstain(f"{symbol} is not in the covered dataset.")
         inst = self._loader.get_instrument(symbol)
         if not inst:
             return self._abstain(f"No instrument record found for {symbol}.")
@@ -127,62 +140,60 @@ class MarketDeskAgent:
         return self._build(answer_text, answer_value, [symbol])
 
     def _price_answer(self, symbol: str, prompt: str, prompt_lower: str) -> Dict[str, Any]:
-        """Answer a price/close question for a symbol at a given date."""
         if not self._loader.is_covered(symbol):
-            return self._abstain(
-                f"{symbol} is not in the covered dataset. "
-                f"No price data is available for this instrument."
-            )
+            return self._abstain(f"{symbol} is not in the covered dataset.")
+
         target_date = self._extract_date(prompt)
-        if target_date is None:
-            # Default to most recent price
-            history = self._loader.get_price_history(symbol)
-            if not history:
-                return self._abstain(f"No price history available for {symbol}.")
-            latest = max(history, key=lambda p: p.get("date", ""))
-            close = float(latest.get("close", 0))
-            date_used = latest.get("date", "")
-            precomputed = f"{symbol} closed at {close:.2f} USD on {date_used} (most recent available)."
+        history = self._loader.get_price_history(symbol)
+        if not history:
+            return self._abstain(f"No price history available for {symbol}.")
+
+        latest_date_str = max(p.get("date", "") for p in history)
+        latest_date = self._loader.parse_date(latest_date_str)
+
+        if target_date is not None:
+            if latest_date and target_date > latest_date:
+                return self._abstain(
+                    f"Requested price date {target_date.date()} is beyond the dataset coverage period."
+                )
+
+            price_rec = self._loader.get_price_on_or_before(symbol, target_date)
+            if not price_rec:
+                return self._abstain(
+                    f"No price data available for {symbol} on or before {target_date.date()}."
+                )
+            close = float(price_rec.get("close", 0))
+            date_used = price_rec.get("date", "")
+            precomputed = f"{symbol} closed at {close:.2f} USD on {date_used}."
             answer_text = self._llm_format(precomputed, prompt)
             return self._build(answer_text, f"{close:.2f}", [symbol])
 
-        price_rec = self._loader.get_price_on_or_before(symbol, target_date)
-        if not price_rec:
-            return self._abstain(
-                f"No price data available for {symbol} on or before {target_date.date()}."
-            )
-        close = float(price_rec.get("close", 0))
-        date_used = price_rec.get("date", "")
-        precomputed = (
-            f"{symbol} closed at {close:.2f} USD on {date_used}. "
-            f"(Most recent month-start close on or before {target_date.date()}.)"
-        )
+        latest = max(history, key=lambda p: p.get("date", ""))
+        close = float(latest.get("close", 0))
+        date_used = latest.get("date", "")
+        precomputed = f"{symbol} closed at {close:.2f} USD on {date_used}."
         answer_text = self._llm_format(precomputed, prompt)
         return self._build(answer_text, f"{close:.2f}", [symbol])
 
     def _return_answer(self, symbol: str, prompt: str, prompt_lower: str) -> Dict[str, Any]:
-        """Compute percentage return between two dates."""
         if not self._loader.is_covered(symbol):
-            return self._abstain(
-                f"{symbol} is not in the covered dataset. "
-                f"No price/return data is available."
-            )
+            return self._abstain(f"{symbol} is not in the covered dataset.")
+
         dates = self._extract_two_dates(prompt)
         if not dates:
-            return self._abstain(
-                "Could not parse the date range for the return calculation."
-            )
+            return self._abstain("Could not parse the date range for the return calculation.")
+
         start_date, end_date = dates
         start_price_rec = self._loader.get_price_on_or_before(symbol, start_date)
         end_price_rec = self._loader.get_price_on_or_before(symbol, end_date)
         if not start_price_rec or not end_price_rec:
-            return self._abstain(
-                f"Insufficient price data for {symbol} in the requested range."
-            )
+            return self._abstain(f"Insufficient price data for {symbol} in the requested range.")
+
         start_close = float(start_price_rec.get("close", 0))
         end_close = float(end_price_rec.get("close", 0))
         if start_close == 0:
             return self._abstain(f"Start price for {symbol} is zero; cannot compute return.")
+
         pct_return = ((end_close - start_close) / start_close) * 100
         start_date_used = start_price_rec.get("date", "")
         end_date_used = end_price_rec.get("date", "")
@@ -194,34 +205,33 @@ class MarketDeskAgent:
         return self._build(answer_text, f"{pct_return:.2f}", [symbol])
 
     def _news_answer(self, symbol: str, prompt: str) -> Dict[str, Any]:
-        """Return news summary for a covered symbol."""
         if not self._loader.is_covered(symbol):
             return self._abstain(
-                f"{symbol} is not in the covered dataset. "
-                f"No news is available for this instrument."
+                f"{symbol} is not in the covered dataset. No news is available."
             )
-        news_items = self._loader.get_news(symbol)
+
+        cutoff = self._extract_date(prompt)
+        news_items = self._loader.get_news(symbol, on_or_before=cutoff)
         if not news_items:
-            return self._abstain(f"No news items found for {symbol} in the dataset.")
-        # Sort by date descending
+            return self._abstain(f"No news items found for {symbol} in the requested timeframe.")
+
         news_items = sorted(news_items, key=lambda n: n.get("date", ""), reverse=True)
         count = len(news_items)
         news_ids = [n.get("id", "") for n in news_items[:6] if n.get("id")]
-        # Build context for LLM
         news_context = "\n".join(
             f"- [{n.get('date')}] {n.get('headline', '')}: {n.get('body', '')}"
             for n in news_items[:5]
         )
-        precomputed = f"{symbol} has {count} news items in the dataset. Recent items:\n{news_context}"
+        precomputed = f"{symbol} has {count} news items. Recent items:\n{news_context}"
         answer_text = self._llm_format(precomputed, prompt)
         return self._build(answer_text, str(count), news_ids)
 
     def _multi_news_answer(self, symbols: List[str], prompt: str) -> Dict[str, Any]:
-        """Return news for multiple covered symbols held by client."""
+        cutoff = self._extract_date(prompt)
         all_news = []
         news_ids = []
         for sym in symbols:
-            items = self._loader.get_news(sym)
+            items = self._loader.get_news(sym, on_or_before=cutoff)
             for n in items:
                 all_news.append(f"[{n.get('date')}] {sym}: {n.get('headline', '')}")
                 if n.get("id"):
@@ -235,21 +245,19 @@ class MarketDeskAgent:
         return self._build(answer_text, str(len(all_news)), news_ids[:6])
 
     def _generic_market_answer(self, symbol: str, prompt: str) -> Dict[str, Any]:
-        """Generic market question for a covered symbol."""
         inst = self._loader.get_instrument(symbol)
         history = self._loader.get_price_history(symbol)
         news = self._loader.get_news(symbol)
         data_ctx = (
             f"Symbol: {symbol}\n"
             f"Instrument: {inst}\n"
-            f"Price history ({len(history)} records, latest: "
-            f"{sorted(history, key=lambda p: p.get('date',''))[-1] if history else 'none'})\n"
+            f"Price history ({len(history)} records)\n"
             f"News: {len(news)} items"
         )
         try:
             run_output = self._agent.run(
                 f"Market data:\n{data_ctx}\n\nQuestion: {prompt}\n\n"
-                f"Answer using only the data above. Do not use your own knowledge of prices."
+                f"Answer using only the data above."
             )
             content = run_output.get_content_as_string() if run_output else ""
             if content:
@@ -263,7 +271,6 @@ class MarketDeskAgent:
     # -----------------------------------------------------------------------
 
     def _extract_date(self, text: str) -> Optional[datetime]:
-        """Extract a single target date from text."""
         iso = re.search(r"(\d{4}-\d{2}-\d{2})", text)
         if iso:
             try:
@@ -296,14 +303,12 @@ class MarketDeskAgent:
         return None
 
     def _extract_two_dates(self, text: str) -> Optional[tuple]:
-        """Extract start and end dates from 'between X and Y' or two ISO dates."""
         m = re.search(r"between\s+(.+?)\s+and\s+(.+?)(?:\s*\.|\s*$)", text, re.I)
         if m:
             d1 = self._extract_date(m.group(1))
             d2 = self._extract_date(m.group(2))
             if d1 and d2:
                 return d1, d2
-        # Two ISO dates
         dates = re.findall(r"\d{4}-\d{2}-\d{2}", text)
         if len(dates) >= 2:
             try:
@@ -317,10 +322,10 @@ class MarketDeskAgent:
             run_output = self._agent.run(
                 f"Data result: {precomputed}\n"
                 f"Question: {original_prompt}\n\n"
-                f"Rephrase the data result clearly. Do not change any values or add your own knowledge."
+                f"Rephrase clearly. Do not change values or add your own knowledge."
             )
             content = run_output.get_content_as_string() if run_output else ""
-            return content.strip() if content else precomputed
+            return sanitize_text(content.strip()) if content else precomputed
         except Exception:
             return precomputed
 
@@ -328,7 +333,7 @@ class MarketDeskAgent:
         self, answer: str, value: Optional[str], citations: List[str]
     ) -> Dict[str, Any]:
         return {
-            "answer": answer,
+            "answer": sanitize_text(answer),
             "answer_value": value,
             "abstained": False,
             "refused": False,

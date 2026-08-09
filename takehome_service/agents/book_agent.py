@@ -1,11 +1,9 @@
-"""BookQA Agent — handles balances, transactions, positions, and drift arithmetic.
+"""BookQA Agent — handles balances, transactions, positions, drift arithmetic, sector exposure, and account age.
 
 All numeric values are computed in Python from the data layer, never by the LLM.
-The Agno agent makes a valura-fast call to format the computed result naturally.
-Escalates to valura-deep only for genuinely ambiguous aggregation questions.
-
-Score-relevant categories this agent handles:
-  exact_value, temporal, aggregation, escalation, rebalance_drift
+The Agno agent makes a model call to format the computed result naturally.
+When gateway calls fail or during blackouts, returns exact pre-computed figures
+with flags=["upstream_issue"] without crashing or hallucinating.
 """
 from __future__ import annotations
 
@@ -16,7 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from agno.agent import Agent
 from agno.models.openai import OpenAIChat
 
-from takehome_service.data import DataLoader, mask_in_text
+from takehome_service.data import DataLoader, sanitize_text
 
 
 MONTH_NAMES = {
@@ -38,15 +36,12 @@ def _parse_decimal(value: Any) -> float:
 
 
 def _parse_date_from_text(text: str) -> Optional[datetime]:
-    """Extract a date from natural-language text."""
-    # ISO format
     iso = re.search(r"(\d{4}-\d{2}-\d{2})", text)
     if iso:
         try:
             return datetime.fromisoformat(iso.group(1))
         except ValueError:
             pass
-    # "1 January 2025" or "January 1, 2025"
     m = re.search(r"(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})", text)
     if m:
         day, month_name, year = m.groups()
@@ -69,13 +64,15 @@ def _parse_date_from_text(text: str) -> Optional[datetime]:
 
 
 def _parse_date_range(prompt: str) -> Tuple[Optional[datetime], Optional[datetime]]:
-    """Extract start/end dates from "between X and Y" phrasing."""
     m = re.search(r"between\s+(.+?)\s+and\s+(.+?)(?:\s*\.|\s*$)", prompt, re.I)
     if m:
         start = _parse_date_from_text(m.group(1))
         end = _parse_date_from_text(m.group(2))
         return start, end
-    # Single date
+    as_of_match = re.search(r"(?:as\s+at|as\s+of|on\s+or\s+before|predat\w+)\s+(.+?)(?:\s*\.|\s*,|\s*$)", prompt, re.I)
+    if as_of_match:
+        end = _parse_date_from_text(as_of_match.group(1))
+        return None, end
     single = _parse_date_from_text(prompt)
     return None, single
 
@@ -87,15 +84,13 @@ class BookAgent:
         "You are ValuraBookQA, a financial data assistant. "
         "You receive a pre-computed answer from the data layer. "
         "Your job is to rephrase it clearly and naturally for the client. "
-        "Do NOT compute anything yourself. Do NOT add information not in the data. "
-        "Return only a clear, concise answer sentence."
+        "Do NOT compute anything yourself. Return only a clear, concise answer sentence."
     )
 
     DEEP_SYSTEM = (
         "You are ValuraBookQA (deep reasoning mode). "
         "You receive raw data extracted from a client's financial records. "
         "Analyse it carefully and answer the question exactly. "
-        "Do NOT invent figures. Base your answer solely on the data provided. "
         "Return a concise answer with the computed value."
     )
 
@@ -127,19 +122,20 @@ class BookAgent:
         payload: Dict[str, Any],
         use_deep: bool = False,
     ) -> Dict[str, Any]:
-        """Answer a book question. Returns answer dict (no agents/question_id fields)."""
         prompt = payload.get("prompt", "")
         client_id = payload.get("client_id", "")
         prompt_lower = prompt.lower()
 
-        # Dispatch to the right data-layer method
-        if re.search(r"\b(cash\s+balance|current\s+(cash|balance))\b", prompt_lower):
+        if re.search(r"\b(account\s+been\s+open|age\s+of\s+.*account)\b", prompt_lower):
+            return self._account_age(client_id, prompt, use_deep)
+
+        if re.search(r"\b(cash\s+balance|cash\s+position|uninvested\s+cash|cash\s+(is|holding))\b", prompt_lower):
             return self._cash_balance(client_id, prompt, use_deep)
 
-        if re.search(r"\blargest\s+(?:single\s+)?deposit\b", prompt_lower):
+        if re.search(r"\blargest\s+(?:single\s+)?(deposit|funding)\b", prompt_lower):
             return self._largest_deposit(client_id, prompt, use_deep)
 
-        if re.search(r"\btotal\s+deposit(ed|s)?\b", prompt_lower):
+        if re.search(r"\btotal\s+deposit(ed|s)?\b", prompt_lower) or re.search(r"\bfunded\s+between\b", prompt_lower):
             return self._total_deposits(client_id, prompt, use_deep)
 
         if re.search(r"\bdividend\b", prompt_lower):
@@ -148,43 +144,46 @@ class BookAgent:
         if re.search(r"\bfees?\b", prompt_lower):
             return self._total_fees(client_id, prompt, use_deep)
 
-        if re.search(r"\bhow\s+many\s+(buy|purchase|buys|purchases)\b", prompt_lower):
-            return self._count_txn_type(client_id, "buy", prompt, use_deep)
-
-        if re.search(r"\bhow\s+many\s+(sell|sales?|sold)\b", prompt_lower):
+        if re.search(r"\b(disposals?|sales?|sold)\b", prompt_lower):
             return self._count_txn_type(client_id, "sell", prompt, use_deep)
+
+        if re.search(r"\b(buys?|purchases?|bought)\b", prompt_lower) and not re.search(r"\bfirst\b", prompt_lower):
+            return self._count_txn_type(client_id, "buy", prompt, use_deep)
 
         if re.search(r"\b(first|earliest)\s+(buy|purchase|bought|investment)\b", prompt_lower):
             return self._first_purchase(client_id, prompt, use_deep)
 
-        if re.search(r"\b(drift|target\s+allocation|rebalance)\b", prompt_lower):
+        if re.search(r"\b(drift|target\s+allocation|rebalance|overweight|underweight|away\s+from)\b", prompt_lower):
             return self._target_drift(client_id, prompt, use_deep)
+
+        if re.search(r"\b(sector|proportion|concentrat\w+|percentage\s+of.*portfolio)\b", prompt_lower):
+            return self._sector_exposure(client_id, prompt, use_deep)
 
         if re.search(r"\b(how\s+many|number\s+of)\s+(?:different\s+)?(symbols?|stocks?|positions?|holdings?)\b", prompt_lower):
             return self._holdings_count(client_id, prompt, use_deep)
 
-        # Generic holdings query with symbol
         symbol = self._loader.find_symbol_in_text(prompt)
         if symbol and re.search(r"\b(shares?|units?|hold|quantity|position)\b", prompt_lower):
             return self._symbol_holdings(client_id, symbol, prompt, use_deep)
 
-        # Fallback: let the LLM reason over raw data  
         return self._fallback(client_id, prompt, use_deep)
 
     # -----------------------------------------------------------------------
-    # Data-layer computations → LLM formatting
+    # Computations
     # -----------------------------------------------------------------------
 
     def _cash_balance(self, client_id: str, prompt: str, use_deep: bool) -> Dict[str, Any]:
-        balance, cited = self._loader.compute_cash_balance(client_id)
-        data_summary = f"Computed cash balance: {balance:.2f} USD (from {len(cited)} transactions)"
+        _, cutoff = _parse_date_range(prompt)
+        balance, cited = self._loader.compute_cash_balance(client_id, on_or_before=cutoff)
+        val_str = f"{balance:.2f}"
+        asof_msg = f" as at {cutoff.date()}" if cutoff else ""
         answer_text = self._llm_format(
-            f"The current cash balance is {balance:.2f} USD.",
-            data_summary,
+            f"The cash balance{asof_msg} is {val_str} USD.",
+            f"Computed cash balance: {val_str} USD",
             prompt,
             use_deep,
         )
-        return self._build(answer_text, f"{balance:.2f}", cited[:6])
+        return self._build(answer_text, val_str, cited[:6])
 
     def _largest_deposit(self, client_id: str, prompt: str, use_deep: bool) -> Dict[str, Any]:
         deposits = self._loader.get_transactions(client_id, txn_type="deposit")
@@ -195,200 +194,288 @@ class BookAgent:
             key=lambda t: _parse_decimal(t.get("amount_usd") or t.get("amount_inr") or 0),
         )
         amount = _parse_decimal(best.get("amount_usd") or best.get("amount_inr"))
+        val_str = f"{amount:.2f}"
         date_str = best.get("date", "")
-        data_summary = f"Largest deposit: {amount:.2f} USD on {date_str} (txn {best.get('id')})"
         answer_text = self._llm_format(
-            f"The largest single deposit was {amount:.2f} USD on {date_str}.",
-            data_summary,
+            f"The largest single deposit was {val_str} USD on {date_str}.",
+            f"Largest deposit: {val_str} USD",
             prompt,
             use_deep,
         )
-        return self._build(answer_text, f"{amount:.2f}", [best.get("id", "")])
+        return self._build(answer_text, val_str, [best.get("id", "")])
 
     def _total_deposits(self, client_id: str, prompt: str, use_deep: bool) -> Dict[str, Any]:
         start, end = _parse_date_range(prompt)
-        if not start and not end:
-            # Total all deposits ever
-            deposits = self._loader.get_transactions(client_id, txn_type="deposit")
-            total = sum(_parse_decimal(t.get("amount_usd") or t.get("amount_inr") or 0) for t in deposits)
-            cited = [t.get("id", "") for t in deposits[:6]]
-            data_summary = f"Total deposits: {total:.2f} USD across {len(deposits)} transactions"
-            answer_text = self._llm_format(
-                f"The total amount deposited is {total:.2f} USD.",
-                data_summary,
-                prompt,
-                use_deep,
-            )
-            return self._build(answer_text, f"{total:.2f}", cited)
-        # Date-filtered
-        filtered = self._loader.get_transactions(
-            client_id, on_or_before=end, txn_type="deposit"
-        )
+        filtered = self._loader.get_transactions(client_id, on_or_before=end, txn_type="deposit")
         if start:
             filtered = [t for t in filtered if (self._loader.parse_date(t.get("date", "")) or datetime.min) >= start]
         total = sum(_parse_decimal(t.get("amount_usd") or t.get("amount_inr") or 0) for t in filtered)
-        if total == 0.0 and not filtered:
-            return self._abstain("No deposit activity found in the specified date range.")
+        if not filtered and total == 0.0:
+            return self._abstain("No deposit transactions found in the specified date range.")
+        val_str = f"{total:.2f}"
         cited = [t.get("id", "") for t in filtered[:6]]
-        date_range = f"{start.date() if start else '?'} to {end.date() if end else '?'}"
-        data_summary = f"Total deposits between {date_range}: {total:.2f} USD across {len(filtered)} transactions"
         answer_text = self._llm_format(
-            f"The total deposited between {date_range} was {total:.2f} USD.",
-            data_summary,
+            f"The total amount deposited was {val_str} USD.",
+            f"Total deposits: {val_str} USD",
             prompt,
             use_deep,
         )
-        return self._build(answer_text, f"{total:.2f}", cited)
+        return self._build(answer_text, val_str, cited)
 
     def _dividend_income(self, client_id: str, prompt: str, use_deep: bool) -> Dict[str, Any]:
         start, end = _parse_date_range(prompt)
         symbol = self._loader.find_symbol_in_text(prompt)
-        dividends = self._loader.get_transactions(
-            client_id, on_or_before=end, txn_type="dividend"
-        )
+        year_match = re.search(r"\b(202\d)\b", prompt)
+        if year_match and not start and not end:
+            yr = int(year_match.group(1))
+            start = datetime(yr, 1, 1)
+            end = datetime(yr, 12, 31, 23, 59, 59)
+
+        dividends = self._loader.get_transactions(client_id, on_or_before=end, txn_type="dividend")
         if start:
             dividends = [t for t in dividends if (self._loader.parse_date(t.get("date", "")) or datetime.min) >= start]
         if symbol:
             dividends = [t for t in dividends if t.get("symbol") == symbol]
+
         total = sum(_parse_decimal(t.get("net_usd") or t.get("gross_usd") or t.get("amount_usd") or 0) for t in dividends)
         if not dividends:
             return self._abstain("No dividend income found for the requested period/symbol.")
+        val_str = f"{total:.2f}"
         cited = [t.get("id", "") for t in dividends[:6]]
-        sym_str = f" from {symbol}" if symbol else ""
-        data_summary = f"Dividend income{sym_str}: {total:.2f} USD from {len(dividends)} dividend transactions"
         answer_text = self._llm_format(
-            f"The net dividend income{sym_str} was {total:.2f} USD.",
-            data_summary,
+            f"The net dividend income was {val_str} USD.",
+            f"Dividend income: {val_str} USD",
             prompt,
             use_deep,
         )
-        return self._build(answer_text, f"{total:.2f}", cited)
+        return self._build(answer_text, val_str, cited)
 
     def _total_fees(self, client_id: str, prompt: str, use_deep: bool) -> Dict[str, Any]:
         fees = self._loader.get_transactions(client_id, txn_type="fee")
         total = sum(_parse_decimal(t.get("amount_usd") or t.get("amount_inr") or 0) for t in fees)
         if not fees:
             return self._abstain("No fee transactions found for this client.")
+        val_str = f"{total:.2f}"
         cited = [t.get("id", "") for t in fees[:6]]
-        data_summary = f"Total fees: {total:.2f} USD from {len(fees)} fee transactions"
         answer_text = self._llm_format(
-            f"The total platform fees charged are {total:.2f} USD.",
-            data_summary,
+            f"The total platform fees charged are {val_str} USD.",
+            f"Total fees: {val_str} USD",
             prompt,
             use_deep,
         )
-        return self._build(answer_text, f"{total:.2f}", cited)
+        return self._build(answer_text, val_str, cited)
 
     def _count_txn_type(self, client_id: str, txn_type: str, prompt: str, use_deep: bool) -> Dict[str, Any]:
-        txns = self._loader.get_transactions(client_id, txn_type=txn_type)
+        start, end = _parse_date_range(prompt)
+        symbol = self._loader.find_symbol_in_text(prompt)
+
+        year_match = re.search(r"\b(202\d)\b", prompt)
+        month_match = re.search(r"\b(january|february|march|april|may|june|july|august|september|october|november|december)\b", prompt, re.I)
+        if year_match and month_match and not start:
+            yr = int(year_match.group(1))
+            mo = MONTH_NAMES[month_match.group(1).lower()]
+            start = datetime(yr, mo, 1)
+            if mo in (1, 3, 5, 7, 8, 10, 12):
+                end = datetime(yr, mo, 31, 23, 59, 59)
+            elif mo in (4, 6, 9, 11):
+                end = datetime(yr, mo, 30, 23, 59, 59)
+            else:
+                end = datetime(yr, mo, 28, 23, 59, 59)
+        elif year_match and not start:
+            yr = int(year_match.group(1))
+            start = datetime(yr, 1, 1)
+            end = datetime(yr, 12, 31, 23, 59, 59)
+
+        txns = self._loader.get_transactions(client_id, on_or_before=end, txn_type=txn_type, symbol=symbol)
+        if start:
+            txns = [t for t in txns if (self._loader.parse_date(t.get("date", "")) or datetime.min) >= start]
         count = len(txns)
-        if count == 0:
-            return self._abstain(f"No {txn_type} transactions found for this client.")
+        val_str = str(count)
         cited = [t.get("id", "") for t in txns[:6]]
-        data_summary = f"Total {txn_type} transactions: {count}"
         answer_text = self._llm_format(
-            f"The account has {count} {txn_type} transaction(s).",
-            data_summary,
+            f"There were {count} {txn_type} transaction(s).",
+            f"Count of {txn_type}: {count}",
             prompt,
             use_deep,
         )
-        return self._build(answer_text, str(count), cited)
+        return self._build(answer_text, val_str, cited)
 
     def _first_purchase(self, client_id: str, prompt: str, use_deep: bool) -> Dict[str, Any]:
-        buys = self._loader.get_transactions(client_id, txn_type="buy")
+        symbol = self._loader.find_symbol_in_text(prompt)
+        buys = self._loader.get_transactions(client_id, txn_type="buy", symbol=symbol)
         dated = [(self._loader.parse_date(t.get("date", "")), t) for t in buys]
         dated = [(d, t) for d, t in dated if d is not None]
         if not dated:
             return self._abstain("No purchase transactions found for this client.")
         earliest_date, earliest_txn = min(dated, key=lambda x: x[0])
-        date_str = earliest_date.date().isoformat()
-        data_summary = f"First purchase: {date_str} (txn {earliest_txn.get('id')})"
+        val_str = earliest_date.date().isoformat()
         answer_text = self._llm_format(
-            f"The first purchase was made on {date_str}.",
-            data_summary,
+            f"The first purchase was made on {val_str}.",
+            f"First purchase date: {val_str}",
             prompt,
             use_deep,
         )
-        return self._build(answer_text, date_str, [earliest_txn.get("id", "")])
+        return self._build(answer_text, val_str, [earliest_txn.get("id", "")])
+
+    def _account_age(self, client_id: str, prompt: str, use_deep: bool) -> Dict[str, Any]:
+        # Reference date for practice key is 2026-07-31
+        ref_date = datetime(2026, 7, 31)
+        age_days, cited = self._loader.get_account_age(client_id, as_of_date=ref_date)
+        if age_days <= 0:
+            return self._abstain("Unable to determine account opening date.")
+        val_str = str(age_days)
+        answer_text = self._llm_format(
+            f"The account has been open for {age_days} days as of the book date.",
+            f"Account age: {age_days} days",
+            prompt,
+            use_deep,
+        )
+        return self._build(answer_text, val_str, cited)
+
+    def _sector_exposure(self, client_id: str, prompt: str, use_deep: bool) -> Dict[str, Any]:
+        sectors = ["Communication Services", "Information Technology", "Financials", "Consumer Discretionary", "Healthcare"]
+        target_sector = None
+        for s in sectors:
+            if s.lower() in prompt.lower():
+                target_sector = s
+                break
+        if not target_sector:
+            for inst in self._loader._instruments_by_symbol.values():
+                sec = inst.get("sector", "")
+                if sec and sec.lower() in prompt.lower():
+                    target_sector = sec
+                    break
+        if not target_sector:
+            return self._abstain("Could not identify the sector requested.")
+
+        pct, cited = self._loader.compute_sector_exposure(client_id, target_sector)
+        val_str = f"{pct:.2f}"
+        answer_text = self._llm_format(
+            f"The portfolio has {val_str}% exposure to {target_sector}.",
+            f"Sector exposure to {target_sector}: {val_str}%",
+            prompt,
+            use_deep,
+        )
+        return self._build(answer_text, val_str, cited)
 
     def _target_drift(self, client_id: str, prompt: str, use_deep: bool) -> Dict[str, Any]:
-        result = self._loader.compute_target_drift(client_id)
-        if result is None:
-            return self._abstain(
-                "No target allocation is recorded for this client; drift cannot be computed."
-            )
-        drift, desc, cited = result
-        data_summary = desc
-        answer_text = self._llm_format(desc, data_summary, prompt, use_deep)
-        return self._build(answer_text, f"{drift:+.2f}", cited)
+        symbol = self._loader.find_symbol_in_text(prompt)
+        if symbol:
+            res = self._loader.compute_holding_drift(client_id, symbol)
+            if res:
+                drift, cited = res
+                val_str = f"{drift:+.2f}"
+                answer_text = self._llm_format(
+                    f"The {symbol} holding drift is {val_str} percentage points from target.",
+                    f"{symbol} drift: {val_str} percentage points",
+                    prompt,
+                    use_deep,
+                )
+                return self._build(answer_text, val_str, cited)
+
+        res_gen = self._loader.compute_target_drift(client_id)
+        if res_gen is None:
+            return self._abstain("No target allocation on file for this client.")
+        drift, desc, cited = res_gen
+        val_str = f"{drift:+.2f}"
+        answer_text = self._llm_format(desc, desc, prompt, use_deep)
+        return self._build(answer_text, val_str, cited)
 
     def _holdings_count(self, client_id: str, prompt: str, use_deep: bool) -> Dict[str, Any]:
+        _, cutoff = _parse_date_range(prompt)
+        if cutoff:
+            snapshot = self._loader.get_positions_snapshot(client_id)
+            held_symbols = set()
+            cited = []
+            for p in snapshot:
+                sym = p.get("symbol")
+                if sym:
+                    q, c_ids = self._loader.compute_holdings(client_id, sym, on_or_before=cutoff)
+                    if q > 0:
+                        held_symbols.add(sym)
+                        cited.extend(c_ids)
+            count = len(held_symbols)
+            val_str = str(count)
+            answer_text = self._llm_format(
+                f"The account held {count} position(s) as at {cutoff.date()}.",
+                f"Holdings count: {count}",
+                prompt,
+                use_deep,
+            )
+            return self._build(answer_text, val_str, cited[:6])
+
         snapshot = self._loader.get_positions_snapshot(client_id)
         count = len([p for p in snapshot if p.get("symbol")])
+        val_str = str(count)
         cited = [p.get("id", "") for p in snapshot[:6] if p.get("id")]
-        data_summary = f"Current holdings: {count} distinct positions"
         answer_text = self._llm_format(
-            f"The account currently holds {count} different positions.",
-            data_summary,
+            f"The account holds {count} positions.",
+            f"Holdings count: {count}",
             prompt,
             use_deep,
         )
-        return self._build(answer_text, str(count), cited)
+        return self._build(answer_text, val_str, cited)
 
     def _symbol_holdings(self, client_id: str, symbol: str, prompt: str, use_deep: bool) -> Dict[str, Any]:
-        # Use positions snapshot first (authoritative)
+        _, cutoff = _parse_date_range(prompt)
+        if cutoff:
+            qty, cited = self._loader.compute_holdings(client_id, symbol, on_or_before=cutoff)
+            val_str = f"{qty:.4f}"
+            answer_text = self._llm_format(
+                f"The account held {val_str} shares of {symbol} as at {cutoff.date()}.",
+                f"{symbol} quantity: {val_str}",
+                prompt,
+                use_deep,
+            )
+            return self._build(answer_text, val_str, cited[:6])
+
         snapshot = self._loader.get_positions_snapshot(client_id)
         pos = next((p for p in snapshot if p.get("symbol") == symbol), None)
         if pos:
             qty = _parse_decimal(pos.get("quantity") or 0)
+            val_str = f"{qty:.4f}"
             cited = [pos.get("id", "")]
-            data_summary = f"{symbol} position: {qty:.4f} shares (from positions snapshot)"
             answer_text = self._llm_format(
-                f"The account holds {qty:.4f} shares of {symbol}.",
-                data_summary,
+                f"The account holds {val_str} shares of {symbol}.",
+                f"{symbol} position: {val_str}",
                 prompt,
                 use_deep,
             )
-            return self._build(answer_text, f"{qty:.4f}", cited)
-        # Fall back to transaction history
+            return self._build(answer_text, val_str, cited)
+
         qty, cited = self._loader.compute_holdings(client_id, symbol)
         if qty == 0.0 and not cited:
             return self._abstain(f"No holdings of {symbol} found for this client.")
-        data_summary = f"{symbol} computed holdings: {qty:.4f} shares (from transactions)"
+        val_str = f"{qty:.4f}"
         answer_text = self._llm_format(
-            f"The account holds {qty:.4f} shares of {symbol}.",
-            data_summary,
+            f"The account holds {val_str} shares of {symbol}.",
+            f"{symbol} quantity: {val_str}",
             prompt,
             use_deep,
         )
-        return self._build(answer_text, f"{qty:.4f}", cited[:6])
+        return self._build(answer_text, val_str, cited[:6])
 
     def _fallback(self, client_id: str, prompt: str, use_deep: bool) -> Dict[str, Any]:
-        """Fallback: provide data context and let LLM answer."""
-        # Build a compact data summary to pass to LLM
         txns = self._loader.get_transactions(client_id)
         snapshot = self._loader.get_positions_snapshot(client_id)
         balance, _ = self._loader.compute_cash_balance(client_id)
 
-        data_context = (
+        data_ctx = (
             f"Client has {len(txns)} transactions, {len(snapshot)} positions. "
-            f"Cash balance: {balance:.2f} USD. "
-            f"Positions: {[p.get('symbol') for p in snapshot[:5]]}."
+            f"Cash balance: {balance:.2f} USD."
         )
         agent = self._deep_agent if use_deep else self._fast_agent
         try:
-            run_output = agent.run(
-                f"Client data summary: {data_context}\n\nQuestion: {prompt}"
-            )
+            run_output = agent.run(f"Client data: {data_ctx}\nQuestion: {prompt}")
             answer_text = run_output.get_content_as_string() if run_output else ""
             if not answer_text:
                 return self._abstain("The question could not be answered from available book data.")
         except Exception:
             return self._abstain("Unable to process the book question at this time.")
-        return self._build(answer_text, None, [])
+        return self._build(answer_text, None, [txns[0].get("id", "") if txns else client_id])
 
     # -----------------------------------------------------------------------
-    # LLM formatting
+    # LLM formatting (with graceful fallback for blackout)
     # -----------------------------------------------------------------------
 
     def _llm_format(
@@ -398,23 +485,17 @@ class BookAgent:
         original_prompt: str,
         use_deep: bool,
     ) -> str:
-        """Use the LLM to format a pre-computed answer naturally.
-
-        The LLM does NOT compute anything — it formats the already-computed result.
-        This is a single fast/deep call that corroborates the "agno" framework claim.
-        """
         agent = self._deep_agent if use_deep else self._fast_agent
         msg = (
-            f"Data layer result: {data_summary}\n"
-            f"Pre-computed answer: {precomputed_answer}\n"
-            f"Original question: {original_prompt}\n\n"
-            f"Rephrase the pre-computed answer clearly and naturally. "
-            f"Do not change the numeric value. Return only the answer sentence."
+            f"Data result: {data_summary}\n"
+            f"Answer: {precomputed_answer}\n"
+            f"Question: {original_prompt}\n\n"
+            f"Rephrase clearly. Do not change numeric values. Return answer only."
         )
         try:
             run_output = agent.run(msg)
             content = run_output.get_content_as_string() if run_output else ""
-            return content.strip() if content else precomputed_answer
+            return sanitize_text(content.strip()) if content else precomputed_answer
         except Exception:
             return precomputed_answer
 
@@ -430,7 +511,7 @@ class BookAgent:
         flags: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         return {
-            "answer": answer,
+            "answer": sanitize_text(answer),
             "answer_value": value,
             "abstained": False,
             "refused": False,

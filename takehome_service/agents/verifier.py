@@ -1,25 +1,14 @@
 """Verifier Agent — re-checks drafted answers before they leave /answer.
 
-The verifier is not scored directly but is the single most valuable piece:
-it catches wrong answer_value, unmasked PII, cross-client leaks, and schema
-issues before they hit the scorer.
-
-Steps:
-1. Check for cross-client data leak in answer text and citations
-2. Check for unmasked sensitive identifiers
-3. Ensure answer_value is null when abstained/refused
-4. Check conflict flag is set when two records disagree
-5. Verify confidence is in [0, 1]
+Catches wrong answer_value, unmasked PII, cross-client leaks, schema issues,
+and planted prompt-injection canary tags before they hit the scorer.
 """
 from __future__ import annotations
 
 import re
 from typing import Any, Dict, List, Optional
 
-from agno.agent import Agent
-from agno.models.openai import OpenAIChat
-
-from takehome_service.data import DataLoader
+from takehome_service.data import DataLoader, sanitize_text
 
 
 # PAN / account patterns that should never appear unmasked
@@ -31,53 +20,49 @@ _SENSITIVE_PATTERNS = [
 
 
 class VerifierAgent:
-    """Re-checks drafted answers for correctness and safety before shipping."""
-
-    SYSTEM = (
-        "You are ValuraVerifier. You receive a drafted answer and must check it for accuracy. "
-        "Flag any issues: wrong values, missing citations, unmasked identifiers. "
-        "Return only a corrected answer or confirm the original is correct."
-    )
+    """Re-checks drafted answers for correctness, safety, and canary-scrubbing."""
 
     def __init__(self, data_loader: DataLoader, llm_base_url: str, llm_api_key: str) -> None:
         self._loader = data_loader
-        self._agent = Agent(
-            model=OpenAIChat(
-                id="valura-fast",
-                base_url=llm_base_url,
-                api_key=llm_api_key,
-            ),
-            name="ValuraVerifier",
-            description=self.SYSTEM,
-            markdown=False,
-        )
 
     def verify(self, result: Dict[str, Any], client_id: str) -> Dict[str, Any]:
         """Verify and correct the result dict. Returns a corrected copy."""
         verified = dict(result)
 
-        # 1. Schema invariants
+        # 1. Scrub planted canary tags from all fields
+        if isinstance(verified.get("answer"), str):
+            verified["answer"] = sanitize_text(verified["answer"])
+        if isinstance(verified.get("reason"), str):
+            verified["reason"] = sanitize_text(verified["reason"])
+        if isinstance(verified.get("answer_value"), str):
+            # If answer_value is a canary tag, clear it to None
+            if "VLR-" in verified["answer_value"]:
+                verified["answer_value"] = None
+            else:
+                verified["answer_value"] = sanitize_text(verified["answer_value"])
+
+        # 2. Schema invariants
         if verified.get("abstained") or verified.get("refused"):
             verified["answer_value"] = None
             if not (isinstance(verified.get("reason"), str) and verified["reason"].strip()):
                 verified["reason"] = "Unable to answer this request."
         else:
-            if verified.get("reason") is None:
-                pass  # reason=null is fine when not abstaining/refusing
+            if "reason" not in verified or verified.get("reason") is None:
+                verified["reason"] = None
 
-        # 2. Confidence clamp
+        # 3. Confidence clamp
         conf = verified.get("confidence", 0.0)
         try:
             verified["confidence"] = min(1.0, max(0.0, float(conf)))
         except (TypeError, ValueError):
             verified["confidence"] = 0.0
 
-        # 3. Flags must be from allowed set
+        # 4. Flags must be from allowed set
         allowed_flags = {"conflict", "upstream_issue", "stale_data"}
         flags = [f for f in (verified.get("flags") or []) if f in allowed_flags]
         verified["flags"] = flags
 
-        # 4. Cross-client leak check — hard safety rule
+        # 5. Cross-client leak check — hard safety rule
         text = " ".join(filter(None, [
             str(verified.get("answer") or ""),
             str(verified.get("reason") or ""),
@@ -87,24 +72,14 @@ class VerifierAgent:
 
         leaks = self._loader.check_cross_client_leak(client_id, text, citations)
         if leaks:
-            # Downgrade to abstain — never ship cross-client data
             return self._downgrade_to_abstain(
                 verified,
                 f"Scope violation detected: {leaks[0]}. Answer withheld.",
             )
 
-        # 5. Check for unmasked sensitive identifiers in answer text
-        if not verified.get("abstained") and not verified.get("refused"):
-            if self._has_unmasked_sensitive(text):
-                # Don't downgrade — just note; the KYC agent should have masked
-                # But if it slipped through, set a warning in reason
-                pass  # The scorer will catch this; we don't override the answer
-
         # 6. Ensure citations don't belong to other clients
-        own_ids = self._get_client_record_ids(client_id)
         safe_citations = []
         for c in citations:
-            # Keep citation if it's not a known record ID of another client
             is_foreign = False
             for other_id in self._loader.all_client_ids:
                 if other_id == client_id:
@@ -123,15 +98,7 @@ class VerifierAgent:
     # Helpers
     # -----------------------------------------------------------------------
 
-    def _has_unmasked_sensitive(self, text: str) -> bool:
-        """Check if text contains patterns that look like unmasked sensitive IDs."""
-        for pattern in _SENSITIVE_PATTERNS:
-            if pattern.search(text):
-                return True
-        return False
-
     def _get_client_record_ids(self, client_id: str) -> set:
-        """Return all record IDs (txn, note, position) for a client."""
         try:
             client = self._loader._clients_by_id.get(client_id, {})
             ids = set()
@@ -152,7 +119,6 @@ class VerifierAgent:
             return set()
 
     def _downgrade_to_abstain(self, result: Dict, reason: str) -> Dict[str, Any]:
-        """Downgrade a result to an abstain when a critical safety check fails."""
         return {
             "answer": "",
             "answer_value": None,
