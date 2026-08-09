@@ -146,8 +146,15 @@ class AnswerService:
 
     def _combine(self, results: List[Dict[str, Any]], client_id: str = "") -> Dict[str, Any]:
         """Merge answers from multiple specialists for multi-agent questions."""
-        good = [r for r in results if not r.get("abstained") and not r.get("refused")]
+        good = [
+            r for r in results
+            if not r.get("abstained") and not r.get("refused")
+            and not (r.get("answer_value") is None and ("STUB-GATEWAY" in str(r.get("answer", "")) or not r.get("answer")))
+        ]
         if not good:
+            for r in results:
+                if r.get("abstained") and r.get("reason"):
+                    return r
             return results[0]
 
         texts = [r.get("answer", "") for r in good if r.get("answer")]

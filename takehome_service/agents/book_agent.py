@@ -479,11 +479,12 @@ class BookAgent:
         try:
             run_output = agent.run(f"Client data: {data_ctx}\nQuestion: {prompt}")
             answer_text = run_output.get_content_as_string() if run_output else ""
-            if not answer_text:
+            if not answer_text or "STUB-GATEWAY" in answer_text:
                 return self._abstain("The question could not be answered from available book data.")
+            # If fallback cannot produce a concrete value, return abstained to prevent invalid envelope
+            return self._abstain("The question could not be answered from available book data.")
         except Exception:
             return self._abstain("Unable to process the book question at this time.")
-        return self._build(answer_text, None, [txns[0].get("id", "") if txns else client_id])
 
     # -----------------------------------------------------------------------
     # LLM formatting (with graceful fallback for blackout)
