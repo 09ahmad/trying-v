@@ -126,45 +126,46 @@ class BookAgent:
         client_id = payload.get("client_id", "")
         prompt_lower = prompt.lower()
 
-        if re.search(r"\b(account\s+been\s+open|age\s+of\s+.*account)\b", prompt_lower):
+        if re.search(r"\b(account\s+(?:been\s+)?open|age\s+of\s+.*account|account\s+age|open\s+for)\b", prompt_lower):
             return self._account_age(client_id, prompt, use_deep)
 
-        if re.search(r"\b(cash\s+balance|cash\s+position|uninvested\s+cash|cash\s+(is|holding))\b", prompt_lower):
+        if re.search(r"\b(cash\s+balance|cash\s+position|uninvested\s+cash|cash\s+(is|holding|held|available))\b", prompt_lower):
             return self._cash_balance(client_id, prompt, use_deep)
 
-        if re.search(r"\blargest\s+(?:single\s+)?(deposit|funding)\b", prompt_lower):
+        if re.search(r"\b(largest|biggest)\s+(?:single\s+|one-off\s+)?(deposit|funding)\b", prompt_lower):
             return self._largest_deposit(client_id, prompt, use_deep)
 
-        if re.search(r"\btotal\s+deposit(ed|s)?\b", prompt_lower) or re.search(r"\bfunded\s+between\b", prompt_lower):
+        if re.search(r"\b(total\s+deposit\w*|funded\s+between|funded\s+in\s+total|sum\s+of\s+deposits?)\b", prompt_lower):
             return self._total_deposits(client_id, prompt, use_deep)
 
-        if re.search(r"\bdividend\b", prompt_lower):
+        if re.search(r"\bdividend\w*\b", prompt_lower):
             return self._dividend_income(client_id, prompt, use_deep)
 
-        if re.search(r"\bfees?\b", prompt_lower):
+        if re.search(r"\bfee\w*\b", prompt_lower):
             return self._total_fees(client_id, prompt, use_deep)
 
-        if re.search(r"\b(disposals?|sales?|sold)\b", prompt_lower):
+        if re.search(r"\b(dispos\w*|sale\w*|sold|sell\w*)\b", prompt_lower):
             return self._count_txn_type(client_id, "sell", prompt, use_deep)
 
-        if re.search(r"\b(buys?|purchases?|bought)\b", prompt_lower) and not re.search(r"\bfirst\b", prompt_lower):
+        if re.search(r"\b(buy\w*|purchas\w*|bought)\b", prompt_lower) and not re.search(r"\b(first|earliest)\b", prompt_lower):
             return self._count_txn_type(client_id, "buy", prompt, use_deep)
 
-        if re.search(r"\b(first|earliest)\s+(buy|purchase|bought|investment)\b", prompt_lower):
+        if re.search(r"\b(first|earliest)\s+(buy\w*|purchas\w*|bought|investment)\b", prompt_lower):
             return self._first_purchase(client_id, prompt, use_deep)
 
-        if re.search(r"\b(drift|target\s+allocation|rebalance|overweight|underweight|away\s+from)\b", prompt_lower):
+        if re.search(r"\b(drift\w*|target\s+allocation|rebalance\w*|overweight|underweight|away\s+from)\b", prompt_lower):
             return self._target_drift(client_id, prompt, use_deep)
 
-        if re.search(r"\b(sector|proportion|concentrat\w+|percentage\s+of.*portfolio)\b", prompt_lower):
+        if re.search(r"\b(sector\w*|proportion\w*|concentrat\w*|percentage\s+of.*portfolio|exposure)\b", prompt_lower):
             return self._sector_exposure(client_id, prompt, use_deep)
 
-        if re.search(r"\b(how\s+many|number\s+of)\s+(?:different\s+)?(symbols?|stocks?|positions?|holdings?)\b", prompt_lower):
+        if re.search(r"\b(how\s+many|number\s+of|count\s+of)\s+(?:different\s+|distinct\s+)?(symbols?|stocks?|positions?|holdings?|instruments?)\b", prompt_lower):
             return self._holdings_count(client_id, prompt, use_deep)
 
         symbol = self._loader.find_symbol_in_text(prompt)
-        if symbol and re.search(r"\b(shares?|units?|hold|quantity|position)\b", prompt_lower):
+        if symbol and re.search(r"\b(shares?|units?|hold\w*|quantity|position\w*)\b", prompt_lower):
             return self._symbol_holdings(client_id, symbol, prompt, use_deep)
+
 
         return self._fallback(client_id, prompt, use_deep)
 
