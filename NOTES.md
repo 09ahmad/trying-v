@@ -4,62 +4,39 @@
 
 ---
 
-# Valura AI Arena — Solution Architecture & Design Notes
+# Valura AI Arena — Solution Architecture & Reflection
 
-## Executive Summary
+## Architecture Overview
 
-This repository contains a production-ready, multi-agent HTTP service built on the **Agno framework** for the Valura AI Take-Home Assessment. The service acts as an intelligent wealth desk, answering complex financial, KYC, market data, and portfolio questions while strictly enforcing data privacy, scope locks, and regulatory compliance.
+Built on **Agno 2.6.9**, this multi-agent service uses a 7-agent ecosystem (`router`, `book_qa`, `kyc_profile`, `notes_desk`, `market_desk`, `compliance`, `verifier`):
 
----
-
-## Key Architecture & Design Choices
-
-### 1. Multi-Agent Ecosystem (Agno)
-
-The solution implements a 7-agent team using the Agno framework:
-
-- **`router` (AgentRouter)**: Always runs first. Uses a rule-based classifier for microsecond dispatch to specialists, avoiding waste of model call budget. Routes advice and cross-client requests directly to `compliance`.
-- **`book_qa` (BookAgent)**: Multi-agent financial book specialist using Agno. Computes all balances, cash transactions, holdings, and rebalance drifts deterministically in Python to prevent LLM hallucination, then formats the output naturally via `valura-fast` or `valura-deep`.
-- **`kyc_profile` (KYCProfileAgent)**: Manages customer identity and KYC profile lookups. All sensitive identifiers pass through a single, un-bypassable masking function.
-- **`notes_desk` (NotesDeskAgent)**: Reads unstructured relationship notes and transaction memos. Employs injection resistance to treat all note text as data rather than instructions.
-- **`market_desk` (MarketDeskAgent)**: Handles instrument prices, sectors, return calculations, and news items. Enforces strict coverage-gap abstentions for instruments outside `covered_symbols`.
-- **`compliance` (ComplianceAgent)**: Enforces regulatory compliance and scope boundaries. Distinctly handles out-of-scope cross-client access and personalized investment advice.
-- **`verifier` (VerifierAgent)**: Post-processes every drafted response before it leaves the service. Validates schema invariants, verifies confidence scores, deduplicates citations, and performs a final cross-client safety sweep.
-
-### 2. Data Layer & Scope Enforcement (`takehome_service/data.py`)
-
-- **Data Loading**: `DataLoader` reads `client_book.json` and `market_data.json` **once at startup**. Per-request disk reads are completely eliminated.
-- **Scope Lock**: Scope boundaries are enforced in Python at the data access layer. Every database accessor requires a `client_id` parameter and filters data strictly for that client.
-- **Masking System**: A single shared function `mask_sensitive(val)` converts bank account numbers, PANs, and identity numbers into the canonical `****XXXX` format (4 stars followed by the last 4 characters).
-- **Month-Start Price Semantics**: Market prices are indexed by instrument symbol and month-start close dates. Lookups use the most recent close on or before the requested target date.
-
-### 3. Safety, Refusals & Failure Handling
-
-- **Advice vs Arithmetic Refusal**: Advice requests (e.g., "should I buy AAPL") trigger a policy refusal (`refused=True`), whereas factual drift calculations ("current vs target allocation") return exact mathematical answers (`refused=False`).
-- **Blackout Resiliency**: Handles gateway `429` rate limits with exponential backoff and Retry-After headers. For quota-exhausted blackouts (`insufficient_quota`), the client immediately raises `BlackoutError`, returning `abstained=True` and setting the `upstream_issue` flag.
-- **Prompt Injection Defense**: Notes Desk flags instruction-like patterns in note bodies, ensuring adversarial texts in relationship notes cannot hijack system instructions.
+1. **Deterministic Data Layer (`takehome_service/data.py`)**: `DataLoader` loads records into memory at startup. All numeric calculations (cash balances, transactions, sector exposure, account age, target drift) are computed deterministically in Python—never by the LLM.
+2. **Strict Scope Locking**: Every data accessor takes `client_id` to enforce hard boundaries in code. Sensitive fields pass through `mask_sensitive()` returning `****XXXX`.
+3. **Safety & Post-Verification**: `ComplianceAgent` handles out-of-scope/advice requests. `VerifierAgent` validates schema, citations, confidence, and executes a final safety sweep before responses leave the service.
 
 ---
 
-## Local Validation Loop
+## Mandatory Reflection & Design Answers
 
-The solution was continuously validated using the offline assessment harness against practice data:
+### 1. Abstention vs. Model Uncertainty
+The service decides it cannot answer via explicit Python logic in `data.py` and specialist agents (`book_agent.py`, `market_agent.py`). For instance, if an instrument is not in `covered_symbols` or a client record lacks required data, the agent sets `abstained=True`, `answer_value=None`, and `confidence=0.0`. This is fundamentally distinct from LLM uncertainty: arithmetic and data lookups are computed entirely in Python before any LLM formatting call. The LLM is never relied upon to compute or guess figures.
 
-```bash
-# 1. Start LLM Gateway (stub mode)
-python gateway/llm_gateway.py
+### 2. Prompt Injection & Note Neutralization
+An adversarial note instructing disclosure (e.g. prompt injection in client relationship notes) is neutralized at multiple layers:
+- **Data & Ingestion Layer**: `detect_injection()` in `data.py` flags suspicious patterns, and note contents are wrapped in explicit XML data blocks (`<note>`) in `notes_agent.py` to instruct the LLM to treat content strictly as inert evidence rather than executable instructions.
+- **Verification Layer**: `VerifierAgent` (`takehome_service/agents/verifier.py`) checks drafted answers against `detect_cross_client_leak()` and PII rules.
+- **Failure Chain**: For an injection to reach the user answer, pattern detection, XML sandboxing, LLM prompt boundaries, and `VerifierAgent` post-validation would all have to fail simultaneously.
 
-# 2. Start Service
-PORT=8080 python -m uvicorn app:app --host 0.0.0.0 --port 8080
+### 3. Provider Downtime Impact (1-Hour Outage)
+When the LLM provider experiences an outage (`BlackoutError` in `llm_client.py`):
+- **Unaffected**: Scope locks, PII masking, client record lookups, and exact Python arithmetic (balances, counts, holdings, age).
+- **Get Worse**: Response prose formatting. Agents fall back to raw precomputed strings directly with `flags=["upstream_issue"]` and `abstained=True` or precomputed values, bypassing LLM natural language rephrasing.
+- **Get Slower**: Requests encountering HTTP 429 rate-limits undergo exponential backoff retries in `llm_client.py` before completing or raising `BlackoutError`.
 
-# 3. Run Assessment
-python harness/run_assessment.py --service http://localhost:8080 --gateway http://localhost:8600 --questions questions/practice_questions.jsonl --out runs/latest
+### 4. Agno Framework Insights & Source Discovery
+- **Pros/Cons**: Agno simplified agent initialization and `OpenAIChat` client wiring. However, default framework side-effects required deeper inspection.
+- **Source Reading Discovery**: Inspection of `agno/agent/__init__.py` revealed that Agno automatically sends outbound telemetry POST requests to `os-api.agno.com` during `Agent.run()`. In isolated grading environments (`networks.assessment.internal: true` in `docker/compose.grading.yml`), these outbound calls hang and fail due to no DNS/route out. Setting `AGNO_TELEMETRY=false` in the `Dockerfile` and `.env` was discovered via source code analysis to completely disable this telemetry call.
 
-# 4. Score Trajectory
-python harness/score.py --key harness/practice_key.json --leakmap harness/practice_leakmap.json --transcript runs/latest/transcript.jsonl --usage runs/latest/gateway_usage.json --roster runs/latest/roster.json
-```
-
-Automated PyTest suite covers all core modules:
-```bash
-pytest tests/ -v
-```
+### 5. Next Steps & Known Weaknesses
+- **Known Weakness**: The top-level `AgentRouter` relies on regex keyword matching rather than Agno's native `Team` delegation or LLM routing primitives. While microsecond-fast and budget-efficient, regex dispatch can fall through on unexpected phrasing (as addressed in Fix 3).
+- **Future Improvements**: Implement a hybrid router combining regex fast-path dispatch with an Agno LLM triage agent for ambiguous queries, expand unit tests for multi-intent questions, and optimize temporal index lookups.
