@@ -1,8 +1,15 @@
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
 runs/
 .env
 .venv/
 venv/
 node_modules/
 .DS_Store
+*.log
+.pytest_cache/
