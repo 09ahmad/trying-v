@@ -80,8 +80,17 @@ class MarketDeskAgent:
                 f"No market data, price, sector, or news is available."
             )
 
-        # 3. Coverage query explicitly
-        if re.search(r"\b(covered|coverage|data\s+available|in\s+your\s+coverage)\b", prompt_lower):
+        # 3. Coverage query — only for IS-X-COVERED status questions.
+        # If the prompt asks for coverage/news *content* with a date cutoff
+        # (e.g. "coverage do we hold dated on or before …", "coverage predat…",
+        #  "coverage up to …"), skip this branch and fall through to the news
+        # handler which already respects date cutoffs via _extract_date.
+        _is_date_cutoff_query = bool(re.search(
+            r"\b(dated|on\s+or\s+before|up\s+to|predat\w*|before\s+\d|as\s+of)\b",
+            prompt_lower,
+        ))
+        if re.search(r"\b(covered|coverage|data\s+available|in\s+your\s+coverage)\b", prompt_lower) \
+                and not _is_date_cutoff_query:
             if symbol:
                 if self._loader.is_covered(symbol):
                     return self._build(
@@ -104,8 +113,12 @@ class MarketDeskAgent:
         if re.search(r"\b(return|performance|gain|loss|percentage\s+change|grew|fell|rose)\b", prompt_lower) and symbol:
             return self._return_answer(symbol, prompt, prompt_lower)
 
-        # 7. News
-        if re.search(r"\b(news|headline|announcement|articles?|reports?|published|published\s+by|items?)\b", prompt_lower):
+        # 7. News — also handles "coverage dated on or before X" queries (stepped
+        # over the coverage-status branch above when _is_date_cutoff_query is True).
+        if re.search(
+            r"\b(news|headline|announcement|articles?|reports?|published|published\s+by|items?|coverage)\b",
+            prompt_lower,
+        ):
             if symbol:
                 return self._news_answer(symbol, prompt)
             covered = self._loader.get_client_covered_symbols(client_id)
