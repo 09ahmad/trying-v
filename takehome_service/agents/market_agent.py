@@ -303,12 +303,21 @@ class MarketDeskAgent:
         return None
 
     def _extract_two_dates(self, text: str) -> Optional[tuple]:
+        # "between X and Y"
         m = re.search(r"between\s+(.+?)\s+and\s+(.+?)(?:\s*\.|\s*$)", text, re.I)
         if m:
             d1 = self._extract_date(m.group(1))
             d2 = self._extract_date(m.group(2))
             if d1 and d2:
                 return d1, d2
+        # "over X to Y" or "from X to Y"
+        m2 = re.search(r"(?:over|from)\s+(.+?)\s+to\s+(.+?)(?:\s*\.|\s*$)", text, re.I)
+        if m2:
+            d1 = self._extract_date(m2.group(1))
+            d2 = self._extract_date(m2.group(2))
+            if d1 and d2:
+                return d1, d2
+        # fallback: two bare ISO dates in order
         dates = re.findall(r"\d{4}-\d{2}-\d{2}", text)
         if len(dates) >= 2:
             try:
