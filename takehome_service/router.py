@@ -35,12 +35,23 @@ _BOOK_QA_PATTERNS = [
     re.compile(r"\b(cash\s+balance|current\s+balance)\b", re.I),
     re.compile(r"\b(deposit|withdrawal|deposited|withdrew)\b", re.I),
     re.compile(r"\b(purchase|bought|buy|sold|sell)\b", re.I),
-    re.compile(r"\b(hold|holding|holdings|position|portfolio)\b", re.I),
-    re.compile(r"\b(how\s+many|count|number\s+of)\b", re.I),
+    re.compile(
+        r"\b(holdings?|positions?|portfolios?|currently\s+hold|did\s+[\w\s']+\s+hold|does\s+[\w\s']+\s+hold|cash\s+[\w\s']+\s+hold)\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b(how\s+many|count(?:\s+of)?|number\s+of)\s+(?:different\s+|distinct\s+|[\w']+\s+){0,2}?"
+        r"(transactions?|shares?|units?|holdings?|positions?|deposits?|withdrawals?|"
+        r"sells?|buys?|purchases?|disposals?|symbols?|stocks?|instruments?|days?)\b",
+        re.I,
+    ),
     re.compile(r"\b(largest|biggest|highest|total|sum|aggregate)\b", re.I),
     re.compile(r"\b(fee|fees|dividend|dividends|payroll|funding)\b", re.I),
     re.compile(r"\b(first\s+(buy|purchase|bought|investment))\b", re.I),
-    re.compile(r"\b(target\s+allocation|recorded\s+target|target.*weight|weight\s+stand|drift|rebalance|overweight|underweight|mandate)\b", re.I),
+    re.compile(
+        r"\b(target\s+allocation|recorded\s+target|target.*weight|weight\s+stand|drift|rebalance|overweight|underweight|mandate)\b",
+        re.I,
+    ),
     re.compile(r"\b(shares?\s+(of|in)|units?\s+(of|in))\b", re.I),
 ]
 
@@ -52,7 +63,7 @@ _KYC_PATTERNS = [
     re.compile(r"\b(nominee|beneficiary)\b", re.I),
     re.compile(r"\b(risk\s+profile|risk\s+appetite|risk\s+tolerance)\b", re.I),
     re.compile(r"\b(kyc|know\s+your\s+customer)\b", re.I),
-    re.compile(r"\b(kyc\s+status|verified|complete)\b", re.I),
+    re.compile(r"\b(kyc\s+status|kyc\s+complete|kyc\s+standing|verified\s+kyc)\b", re.I),
     re.compile(r"\b(bank\s+account|account\s+number|ifsc)\b", re.I),
     re.compile(r"\b(annual\s+income|income\s+band)\b", re.I),
     re.compile(r"\b(date\s+of\s+birth|dob|born)\b", re.I),
@@ -61,7 +72,13 @@ _KYC_PATTERNS = [
 
 # --- Notes / memo patterns ---
 _NOTES_PATTERNS = [
-    re.compile(r"\b(notes?|memos?)\b", re.I),
+    re.compile(
+        r"\b((?:relationship|compliance|advisor|client|transaction)\s+notes?|"
+        r"notes?\s+(?:on\s+file|say|summary|history|record|for|about|attached)|"
+        r"per\s+the\s+notes?|summary\s+of\s+notes?|"
+        r"(?:transaction\s+)?memos?\s+(?:attached|for|on|about|say|on\s+file))\b",
+        re.I,
+    ),
     re.compile(r"\b(relationship\s+(manager|notes?|history))\b", re.I),
     re.compile(r"\b(outstanding\s+(actions?|tasks?|items?))\b", re.I),
     re.compile(r"\b(summary\s+of\s+notes?|notes?\s+summary)\b", re.I),
@@ -77,7 +94,12 @@ _MARKET_PATTERNS = [
     re.compile(r"\b(close\s+price|closing\s+price|price\s+(of|for|on))\b", re.I),
     re.compile(r"\b(return|performance|percentage\s+(change|gain|loss))\b", re.I),
     re.compile(r"\b(news|headline|announcement)\b", re.I),
-    re.compile(r"\b(covered|coverage|market\s+data)\b", re.I),
+    re.compile(
+        r"\b(market\s+(?:data|coverage)|(?:news|research|analyst)\s+coverage|"
+        r"coverage\s+(?:on\s+file|we\s+hold|dated|for|of)|"
+        r"covered\s+(?:symbol|stock|instrument|security|by))\b",
+        re.I,
+    ),
     re.compile(r"\b(instrument|security|stock|etf|fund)\b", re.I),
     re.compile(r"\b(market\s+cap|listed\s+on|exchange)\b", re.I),
 ]
