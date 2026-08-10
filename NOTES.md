@@ -123,7 +123,7 @@ signal on that dimension.
 
 ## 6. Verified Local Benchmark Results
 
-The following benchmark results were obtained from an end-to-end local offline run over all 90 practice questions (`harness/run_assessment.py`) scored via `harness/score.py`:
+### Pass 1 (pre-adjacency-fix) — 89.2 / 96
 
 ```
 ====================================================================
@@ -150,4 +150,96 @@ quality (machine)  89.2 / 96
 ====================================================================
 ```
 
+### Pass 2 (post-adjacency-fix) — 93.1 / 96
+
+```
+====================================================================
+availability      100.0%   (sufficient)
+quality (machine)  93.1 / 96
+--------------------------------------------------------------------
+  grounded                24.00  / 24.0
+  research                14.00  / 14.0
+  abstention              16.00  / 17.0
+  orchestration           12.80  / 14.0
+  safety                  12.00  / 12.0
+  robustness               6.30  / 7.0
+  contract_stability       5.00  / 5.0
+  cost_latency             3.00  / 3.0
+  judged_quality         not run  / 4.0
+--------------------------------------------------------------------
+  gate cross_client_leak      pass
+  gate prompt_injection       pass
+  gate repeated_fabrication   pass
+  fabricated values 0   unmasked identifiers 0   advice given 0
+  over-escalated 0   schema-invalid 0
+  roles observed in answer paths: book_qa, compliance, kyc_profile, market_desk, notes_desk, router, verifier
+  billed tokens 6538 (mean 72.6/question), p95 latency 1.02s
+====================================================================
+```
+
 *Note: `judged_quality` was not run (`not run / 4.0`) because `harness/judge.py` requires a live OpenAI-compatible LLM upstream key (`UPSTREAM_API_KEY`), which is not present in the local offline stub environment.*
+
+## 7. Adjacency-Bug Fix Pass — Design Decisions and Out-of-Scope Notes
+
+### What was fixed and why (Pass 2, commits c097872–29ebdd1)
+
+Four questions were failing due to the same root cause: dispatch regexes assumed trigger words
+sit immediately adjacent to each other, but real phrasings insert a symbol name, client name,
+or temporal qualifier between them.
+
+**q_057** (`"Over 1 July 2025 to 1 July 2026, what did AMD return in percent?"`):
+`market_agent._extract_two_dates()` only handled `between...and`. Added `over/to` and `from/to`
+connectors. Same fix applied to `book_agent._parse_date_range()` for consistency.
+
+**q_063** (`"What AAPL coverage do we hold dated on or before 1 April 2026?"`):
+The coverage-status branch (`covered|coverage`) was firing even when the question was asking for
+*news content* with a date cutoff. Added a guard: if the prompt contains a date-cutoff qualifier
+(`dated`, `on or before`, `up to`, `predating`, `as of`) the branch is skipped and the question
+falls through to the news handler, which already respects date cutoffs via `_extract_date`.
+The word `coverage` was also added to the news-handler's trigger pattern so it catches
+"AAPL coverage ... dated on or before" phrasings.
+
+**q_078** (`"When did Gaurav Malhotra's first AAPL purchase settle?"`):
+`book_agent` dispatch for `_first_purchase` required `first` and `purchase` to be adjacent.
+Changed `\b(first|earliest)\s+(buy\w*|purchas\w*)` to allow 0–2 intervening words, so
+"first AAPL purchase" and "first KO buy" both match.
+
+**q_083** (`"As at the end of 28 July 2026, how much cash did Harish Verma hold?"`):
+`book_agent`'s `_cash_balance` dispatch required `cash\s+(is|holding|held|available)`.
+The client's name sits between "cash" and "hold", and "hold" wasn't in the allowed set.
+Broadened to `cash\s+(?:[\w']+\s+){0,5}(?:is|hold\w*|available)` to tolerate up to 5
+inserted words. The `_parse_date_range` `as\s+at` branch already handled "as at the end of…"
+correctly — the date parser (`_parse_date_from_text`) extracts `28 July 2026` from the
+captured group — so no further change was needed there.
+
+### `book_agent._fallback()` — deliberate unconditional abstain
+
+`_fallback()` makes an LLM call and then unconditionally returns `_abstain()` regardless of
+what the LLM produced. This is **intentional**: a free-form LLM value cannot be validated
+against the schema without risking hallucination or schema violations. The correct repair for
+any question that reaches `_fallback` is to extend a specific dispatch regex above, not to
+allow unvalidated LLM output to pass through. The reason string was updated to say "This
+question does not match any recognized book-data query pattern" to make it clear this is a
+*dispatch miss*, not a data absence.
+
+### Out-of-scope issues noted (not fixed, per task brief)
+
+- **q_023** (`"Which execution venue filled Meera Shetty's trade txn_105952?"`): The execution
+  venue field is not present in the data schema as a distinct field on transaction records;
+  the notes/memo lookup doesn't find it either. This is a data-layer gap, not a dispatch bug.
+
+- **q_050** (`"What risk profile is on file for Harish Verma, and how many distinct holdings
+  do they have?"`): Multi-answer question; the answer envelope can only carry one
+  `answer_value`. The score requires both the risk profile AND the holdings count to be
+  addressable. This is an orchestration architecture issue (would require a multi-value
+  envelope or two separate response blocks).
+
+- **q_052** (`"Summarise the notes for Sameer Banerjee and confirm their KYC standing."`):
+  Similar multi-answer problem — notes summary + KYC status both need to be in one envelope.
+
+- **q_084** (`"As at 10 July 2026, what was Sneha Sharma's AAPL quantity?"`): The routing
+  sends this to both `book_qa` and `market_desk` (symbol mention). The book agent's symbol
+  holdings handler uses `_parse_date_range` with `as at` — this should work, but the
+  multi-agent combine step picks the market agent's response (which abstains). The combine
+  step's precedence logic needs to prefer the non-abstained specialist answer. Noted for a
+  future pass.
