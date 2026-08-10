@@ -160,7 +160,9 @@ class BookAgent:
         if re.search(r"\b(buy\w*|purchas\w*|bought)\b", prompt_lower) and not re.search(r"\b(first|earliest)\b", prompt_lower):
             return self._count_txn_type(client_id, "buy", prompt, use_deep)
 
-        if re.search(r"\b(first|earliest)\s+(buy\w*|purchas\w*|bought|investment)\b", prompt_lower):
+        # Allow 0-2 words between "first/earliest" and the buy/purchase keyword so
+        # "first AAPL purchase" and "first KO buy" both match (q_078 fix).
+        if re.search(r"\b(first|earliest)\s+(?:\w+\s+){0,2}(buy\w*|purchas\w*|bought|investment)\b", prompt_lower):
             return self._first_purchase(client_id, prompt, use_deep)
 
         if re.search(r"\b(drift\w*|target\s+allocation|recorded\s+target|target.*weight|weight\s+stand|rebalance\w*|overweight|underweight|away\s+from)\b", prompt_lower):
