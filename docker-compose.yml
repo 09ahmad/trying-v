@@ -1,0 +1,56 @@
+services:
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    image: valura-takehome-gateway
+    container_name: valura-gateway
+    ports:
+      - "8600:8600"
+    environment:
+      UPSTREAM_MODE: "${UPSTREAM_MODE:-stub}"
+      UPSTREAM_BASE_URL: "${UPSTREAM_BASE_URL:-}"
+      UPSTREAM_API_KEY: "${UPSTREAM_API_KEY:-}"
+      MODEL_MAP_FAST: "${MODEL_MAP_FAST:-}"
+      MODEL_MAP_DEEP: "${MODEL_MAP_DEEP:-}"
+      GATEWAY_PORT: "8600"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8600/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - assessment
+
+  answer_service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: valura-answer-service
+    container_name: valura-answer-service
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      BOOK_PATH: /data/client_book.json
+      MARKET_PATH: /data/market_data.json
+      LLM_BASE_URL: http://gateway:8600/v1
+      LLM_API_KEY: "${LLM_API_KEY:-assessment}"
+      PORT: "8080"
+      AGNO_TELEMETRY: "${AGNO_TELEMETRY:-false}"
+    volumes:
+      - ./data/client_book.json:/data/client_book.json:ro
+      - ./data/market_data.json:/data/market_data.json:ro
+    depends_on:
+      gateway:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - assessment
+
+networks:
+  assessment:
+    driver: bridge

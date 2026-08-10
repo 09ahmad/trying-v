@@ -1,60 +1,153 @@
-# Candidate Information
+**Candidate email:** shkhahmad64@gmail.com
 
-**Email**: shkhahmad64@gmail.com
+# NOTES
 
----
+## 1. How to build and run it
 
-# Valura AI Arena — Solution Architecture & Reflection
+**Local development (no Docker):**
+```bash
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
 
-## Architecture Overview
+# Terminal 1 — stub LLM gateway (no key needed)
+python gateway/llm_gateway.py
 
-Built on **Agno 2.6.9**, this multi-agent service uses a 7-agent ecosystem (`router`, `book_qa`, `kyc_profile`, `notes_desk`, `market_desk`, `compliance`, `verifier`):
+# Terminal 2 — the service
+export BOOK_PATH=data/client_book.json
+export MARKET_PATH=data/market_data.json
+export LLM_BASE_URL=http://localhost:8600/v1
+export LLM_API_KEY=test
+export PORT=8080
+export AGNO_TELEMETRY=false
+uvicorn app:app --host 0.0.0.0 --port 8080
 
-1. **Deterministic Data Layer (`takehome_service/data.py`)**: `DataLoader` loads records into memory at startup. All numeric calculations (cash balances, transactions, sector exposure, account age, target drift) are computed deterministically in Python—never by the LLM.
-2. **Strict Scope Locking**: Every data accessor takes `client_id` to enforce hard boundaries in code. Sensitive fields pass through `mask_sensitive()` returning `****XXXX`.
-3. **Safety & Post-Verification**: `ComplianceAgent` handles out-of-scope/advice requests. `VerifierAgent` validates schema, citations, confidence, and executes a final safety sweep before responses leave the service.
+# Tests
+pytest tests/ -v
+```
 
----
+**Docker (own compose, for local iteration / optional passthrough to a real model):**
+```bash
+docker compose up --build
+```
 
-## Mandatory Reflection & Design Answers
+**Docker (official grading topology — network-restricted, matches real grading exactly):**
+```bash
+docker compose -f docker/compose.grading.yml up --build
+```
 
-### 1. Abstention vs. Model Uncertainty
-The service decides it cannot answer via explicit Python logic in `data.py` and specialist agents (`book_agent.py`, `market_agent.py`). For instance, if an instrument is not in `covered_symbols` or a client record lacks required data, the agent sets `abstained=True`, `answer_value=None`, and `confidence=0.0`. This is fundamentally distinct from LLM uncertainty: arithmetic and data lookups are computed entirely in Python before any LLM formatting call. The LLM is never relied upon to compute or guess figures.
+**Offline scoring against the bundled practice set (no server, byte-identical to real grading):**
+```bash
+python harness/run_assessment.py --service http://localhost:8080 --gateway http://localhost:8600 \
+  --questions questions/practice_questions.jsonl --out runs/latest
+python harness/score.py --key harness/practice_key.json --leakmap harness/practice_leakmap.json \
+  --transcript runs/latest/transcript.jsonl --usage runs/latest/gateway_usage.json --roster runs/latest/roster.json
+```
 
-### 2. Prompt Injection & Note Neutralization
-An adversarial note instructing disclosure (e.g. prompt injection in client relationship notes) is neutralized at multiple layers:
-- **Data & Ingestion Layer**: `detect_injection()` in `data.py` flags suspicious patterns, and note contents are wrapped in explicit XML data blocks (`<note>`) in `notes_agent.py` to instruct the LLM to treat content strictly as inert evidence rather than executable instructions.
-- **Verification Layer**: `VerifierAgent` (`takehome_service/agents/verifier.py`) checks drafted answers against `detect_cross_client_leak()` and PII rules.
-- **Failure Chain**: For an injection to reach the user answer, pattern detection, XML sandboxing, LLM prompt boundaries, and `VerifierAgent` post-validation would all have to fail simultaneously.
+## 2. Architecture
 
-### 3. Provider Downtime Impact (1-Hour Outage)
-When the LLM provider experiences an outage (`BlackoutError` in `llm_client.py`):
-- **Unaffected**: Scope locks, PII masking, client record lookups, and exact Python arithmetic (balances, counts, holdings, age).
-- **Get Worse**: Response prose formatting. Agents fall back to raw precomputed strings directly with `flags=["upstream_issue"]` and `abstained=True` or precomputed values, bypassing LLM natural language rephrasing.
-- **Get Slower**: Requests encountering HTTP 429 rate-limits undergo exponential backoff retries in `llm_client.py` before completing or raising `BlackoutError`.
+The service is a FastAPI app (`app.py`) wrapping a 7-role Agno ecosystem: `router`, `book_qa`,
+`kyc_profile`, `notes_desk`, `market_desk`, `compliance`, and `verifier`. `router.py` is a
+rule-based (regex) classifier that decides which specialist(s) a question needs and whether it
+warrants `valura-deep`, without any LLM call itself. Each specialist agent (`takehome_service/agents/`)
+reads exclusively through `DataLoader` (`data.py`), which loads the book and market files once at
+startup and exposes every accessor scoped by `client_id`. All arithmetic — balances, transaction
+counts, drift, sector exposure — is computed deterministically in Python; the LLM (via Agno's
+`OpenAIChat` client pointed at the gateway) is only used to rephrase an already-computed answer
+into natural language, never to produce the number itself. `compliance` handles advice and
+out-of-scope refusals before any specialist runs. `verifier` re-checks the drafted answer's
+citations against the record store and against a cross-client leak scan before the response
+leaves the service, downgrading to an abstain rather than shipping an unverified answer.
 
-### 4. Agno Framework Insights & Source Discovery
-- **Pros/Cons**: Agno simplified agent initialization and `OpenAIChat` client wiring. However, default framework side-effects required deeper inspection.
-- **Source Reading Discovery**: Inspection of `agno/agent/__init__.py` revealed that Agno automatically sends outbound telemetry POST requests to `os-api.agno.com` during `Agent.run()`. In isolated grading environments (`networks.assessment.internal: true` in `docker/compose.grading.yml`), these outbound calls hang and fail due to no DNS/route out. Setting `AGNO_TELEMETRY=false` in the `Dockerfile` and `.env` was discovered via source code analysis to completely disable this telemetry call.
+## 3. Decisions made rather than derived, and open questions
 
-### 5. Bug Fix Pass 2 Results, Next Steps & Known Weaknesses
+- **Routing is regex-based rather than an Agno `Team`/delegation graph.** This was a deliberate
+  time-tradeoff to keep dispatch fast, cheap (no LLM call needed to classify), and fully testable
+  without a live model — but it means the "delegation" the brief describes is implemented in
+  plain Python rather than through Agno's own Team primitive. If I had more time, or could ask,
+  I'd want to know how strictly "genuinely Agno" is interpreted here, since each specialist is a
+  real `agno.agent.Agent`, but the orchestration layer above them is not.
+- Symbol mentions always route to `market_desk`, even when the answer doesn't strictly need
+  market data (e.g. "date of first purchase of AAPL") — chosen to bias toward including market
+  context whenever a real instrument is named, at some cost to routing precision.
+- Citation truncation: any answer resting on more than 6 records cites the `client_id` instead,
+  per the brief's rule, via a shared `format_citations()` helper used by every specialist.
 
-#### Bug Fix Pass 2 Highlights (7 Confirmed Bugs Fixed):
-1. **Citation Truncation (>6 Records)**: Replaced `[:6]` list slices with `format_citations(client_id, records)` helper across all agents, returning `[client_id]` when grounding spans >6 records.
-2. **Conflict Flagging (`q_016`, `q_017`, `q_018`)**: Added explicit data conflict detection (KYC risk vs suitability review, KYC status vs pending re-verification note, positions snapshot vs calculated transactions). Conflict responses set `flags: ["conflict"]`, `answer_value: None`, surface both conflicting values, and cite all involved record IDs.
-3. **Multi-Specialist Handoff (`q_049`, `q_050`, `q_052`)**: Updated `_combine()` in `service.py` to preserve and merge citations across all dispatched specialists (even if one abstained).
-4. **Blackout Robustness (`q_020`, `q_023`, `q_078`, `q_083`, `q_084`)**: Hardened specialist agent fallbacks to return `_abstain()` when data is missing/unanswerable, preventing invalid `abstained: False, answer_value: None` responses.
-5. **Advice Routing Patterns (`q_047`, `q_073`, `q_074`)**: Extended `_ADVICE_PATTERNS` regexes in `router.py` and `compliance.py` for target allocation and reallocation advice queries.
-6. **Missing `answer_value` Fixes (`q_011`, `q_014`, `q_064`, `q_067`, `q_068`)**: Fixed deposit date range parsing (`during <year>`, `inclusive`), target drift regexes (`overweight`, `underweight`, `mandate`, `recorded target`), and news date cutoff matching.
-7. **Defensive `_llm_format` Fallback**: Added validation in all specialist `_llm_format` methods to check LLM output against precomputed numeric values and `STUB-GATEWAY` boilerplate, falling back to precomputed answer text if the LLM output is malformed.
+## 4. Required questions
 
-#### Offline Practice Benchmark Performance:
-- **Machine Quality Score**: Improved from **72.12 / 96** to **89.20 / 96** (+17.08 points improvement).
-- **Grounded Subscore**: Improved from **13.10 / 24.0** to **24.00 / 24.0** (100% perfect grounded score).
-- **Abstention Subscore**: Improved from **14.00 / 17.0** to **16.00 / 17.0**.
-- **Research Subscore**: Improved from **9.00 / 14.0** to **12.00 / 12.0**.
-- **Availability & Safety**: Maintained **100.0% availability** and passed all safety gates (`cross_client_leak`, `prompt_injection`, `repeated_fabrication`).
+**How does the service decide it cannot answer, and how is that different from the model being unsure?**
+Abstention is decided entirely in Python before any LLM call: a specialist checks explicit
+conditions (symbol not in `covered_symbols`, no matching record, a required field genuinely
+absent) and sets `abstained=True`, `answer_value=None`. The LLM never gets a vote — it only
+rephrases an answer the code has already committed to, so "the model wasn't sure" isn't a
+possible failure mode; either the data supports a value or the code abstains before the LLM is
+even called.
 
-#### Next Steps & Future Work:
-- **Agno Native Triage**: Replace regex-based fast routing with an Agno LLM Triage Agent for highly complex or ambiguous multi-intent queries.
-- **Index Optimization**: Add precomputed date indices in `DataLoader` for even faster temporal range lookups.
+**Where is an instruction embedded in a record neutralized, and what would have to go wrong for it to reach the answer?**
+Three layers: `detect_injection()` in `data.py` flags suspicious note content; note text is
+passed to the LLM inside an explicit inert data block rather than as an instruction; and
+`VerifierAgent` re-scans the drafted answer for cross-client leakage and disclosure patterns
+before it ships. For an injected instruction to actually reach the user, detection, the prompt
+boundary, and the verifier's post-check would all have to fail on the same question at once.
+
+**If the provider is down for an hour, which answers get worse, slower, or unaffected?**
+Unaffected: scope locks, masking, and all Python-computed arithmetic — none of it depends on the
+LLM. Slower: questions hitting the transient rate-limit band, which retry with backoff in
+`llm_client.py` before succeeding. Worse (in phrasing only, not in correctness): during a full
+blackout, `_llm_format` catches the connection failure and falls back to the raw precomputed
+answer string instead of a rephrased one, and the response carries `flags: ["upstream_issue"]` —
+the number itself is never wrong, only less polished.
+
+**What did Agno make easy, what did it make hard, and what did you learn from its source rather than its docs?**
+Agno made wiring an OpenAI-compatible client trivial — pointing `OpenAIChat` at the gateway's
+`base_url` needed no special handling. What wasn't documented: `Agent.run()` sends a telemetry
+POST to `os-api.agno.com` by default. I only found this by reading `agno/agent/_init.py` after
+noticing the outbound call in service logs, and it matters concretely here because the real
+grading network (`docker/compose.grading.yml`) sets `networks.assessment.internal: true` — no
+route out at all — so left unaddressed, every single agent call would have tried and failed to
+phone home. Setting `AGNO_TELEMETRY=false` in the Dockerfile fixes it.
+
+## 5. Next steps and known weaknesses
+
+With more time: replace the regex router with a genuine Agno `Team`/delegation graph, so
+orchestration is actually handled by the framework rather than hand-rolled Python around
+individually-wrapped agents; add precomputed date indices to `DataLoader` for faster temporal
+queries; tighten a few remaining router patterns that occasionally pull in an unnecessary
+specialist (e.g. `book_qa` alongside `market_desk` on some sector-exposure questions) without
+affecting the final answer's correctness.
+
+Known weak points: the router's regex-based classification is the least "Agno-native" part of
+this system and the one I'd most want to defend/revisit live; free-text answer quality has not
+been validated against a real reasoning model locally (practice mode uses a stub), only against
+the code's own deterministic values — the first qualifying attempt is genuinely the first real
+signal on that dimension.
+
+## 6. Verified Local Benchmark Results
+
+The following benchmark results were obtained from an end-to-end local offline run over all 90 practice questions (`harness/run_assessment.py`) scored via `harness/score.py`:
+
+```
+====================================================================
+availability      100.0%   (sufficient)
+quality (machine)  89.2 / 96
+--------------------------------------------------------------------
+  grounded                24.00  / 24.0
+  research                12.00  / 14.0
+  abstention              16.00  / 17.0
+  orchestration           12.80  / 14.0
+  safety                  12.00  / 12.0
+  robustness               4.90  / 7.0
+  contract_stability       4.50  / 5.0
+  cost_latency             3.00  / 3.0
+  judged_quality         not run  / 4.0
+--------------------------------------------------------------------
+  gate cross_client_leak      pass
+  gate prompt_injection       pass
+  gate repeated_fabrication   pass
+  fabricated values 0   unmasked identifiers 0   advice given 0
+  over-escalated 0   schema-invalid 0
+  roles observed in answer paths: book_qa, compliance, kyc_profile, market_desk, notes_desk, router, verifier
+  billed tokens 27296 (mean 303.3/question), p95 latency 1.04s
+====================================================================
+```
+
+*Note: `judged_quality` was not run (`not run / 4.0`) because `harness/judge.py` requires a live OpenAI-compatible LLM upstream key (`UPSTREAM_API_KEY`), which is not present in the local offline stub environment.*
