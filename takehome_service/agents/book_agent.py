@@ -64,10 +64,19 @@ def _parse_date_from_text(text: str) -> Optional[datetime]:
 
 
 def _parse_date_range(prompt: str) -> Tuple[Optional[datetime], Optional[datetime]]:
+    # "between X and Y" (inclusive optional)
     m = re.search(r"between\s+(.+?)\s+and\s+(.+?)(?:\s+inclusive|\s*\.|\s*,|\s*$)", prompt, re.I)
     if m:
         start = _parse_date_from_text(m.group(1))
         end = _parse_date_from_text(m.group(2))
+        if end:
+            end = end.replace(hour=23, minute=59, second=59)
+        return start, end
+    # "over X to Y" or "from X to Y"
+    m2 = re.search(r"(?:over|from)\s+(.+?)\s+to\s+(.+?)(?:\s+inclusive|\s*\.|\s*,|\s*$)", prompt, re.I)
+    if m2:
+        start = _parse_date_from_text(m2.group(1))
+        end = _parse_date_from_text(m2.group(2))
         if end:
             end = end.replace(hour=23, minute=59, second=59)
         return start, end
@@ -139,7 +148,13 @@ class BookAgent:
         if re.search(r"\b(account\s+(?:been\s+)?open|age\s+of\s+.*account|account\s+age|open\s+for)\b", prompt_lower):
             return self._account_age(client_id, prompt, use_deep)
 
-        if re.search(r"\b(cash\s+balance|cash\s+position|uninvested\s+cash|cash\s+(is|holding|held|available))\b", prompt_lower):
+        # Broaden to tolerate inserted words like a client name between "cash" and
+        # "hold/holding/held" — e.g. "how much cash did Harish Verma hold" (q_083 fix).
+        if re.search(
+            r"\b(cash\s+balance|cash\s+position|uninvested\s+cash"
+            r"|cash\s+(?:[\w']+\s+){0,5}(?:is|hold\w*|available))\b",
+            prompt_lower,
+        ):
             return self._cash_balance(client_id, prompt, use_deep)
 
         if re.search(r"\b(largest|biggest)\s+(?:single\s+|one-off\s+)?(deposit|funding)\b", prompt_lower):
@@ -492,11 +507,20 @@ class BookAgent:
             run_output = agent.run(f"Client data: {data_ctx}\nQuestion: {prompt}")
             answer_text = run_output.get_content_as_string() if run_output else ""
             if not answer_text or "STUB-GATEWAY" in answer_text:
-                return self._abstain("The question could not be answered from available book data.")
-            # If fallback cannot produce a concrete value, return abstained to prevent invalid envelope
-            return self._abstain("The question could not be answered from available book data.")
+                return self._abstain(
+                    "This question does not match any recognized book-data query pattern."
+                )
+            # Deliberate choice: always abstain from _fallback even if the LLM returned
+            # something, because we cannot validate a free-form LLM value against the
+            # schema without risking hallucination. The correct fix is to extend the
+            # dispatch regexes above, not to trust unvalidated LLM output here.
+            return self._abstain(
+                "This question does not match any recognized book-data query pattern."
+            )
         except Exception:
-            return self._abstain("Unable to process the book question at this time.")
+            return self._abstain(
+                "This question does not match any recognized book-data query pattern."
+            )
 
     # -----------------------------------------------------------------------
     # LLM formatting (with graceful fallback for blackout)
