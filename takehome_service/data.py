@@ -109,11 +109,23 @@ class DataLoader:
     Loaded once at startup. All accessors require client_id and enforce scope.
     """
 
-    def __init__(self, book_path: str, market_path: str) -> None:
-        self.book_path = Path(book_path)
-        self.market_path = Path(market_path)
-        self._book: Dict[str, Any] = self._load_json(self.book_path)
-        self._market: Dict[str, Any] = self._load_json(self.market_path)
+    def __init__(self, book_path: Any, market_path: Any = None) -> None:
+        if isinstance(book_path, dict):
+            self.book_path = Path("data/client_book.json")
+            self._book = book_path
+        else:
+            self.book_path = Path(book_path)
+            self._book = self._load_json(self.book_path)
+
+        if isinstance(market_path, dict):
+            self.market_path = Path("data/market_data.json")
+            self._market = market_path
+        elif market_path is not None:
+            self.market_path = Path(market_path)
+            self._market = self._load_json(self.market_path)
+        else:
+            self.market_path = Path("data/market_data.json")
+            self._market = self._load_json(self.market_path)
 
         # Index clients by id for O(1) lookup
         self._clients_by_id: Dict[str, Dict] = {}

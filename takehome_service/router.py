@@ -53,6 +53,7 @@ _BOOK_QA_PATTERNS = [
         re.I,
     ),
     re.compile(r"\b(shares?\s+(of|in)|units?\s+(of|in))\b", re.I),
+    re.compile(r"\b(quantity|qty)\b", re.I),
 ]
 
 # --- KYC / identity patterns ---
@@ -164,8 +165,8 @@ class AgentRouter:
 
         # Extract symbol if relevant
         symbol = self._loader.find_symbol_in_text(prompt)
-        if symbol:
-            needs_market = True  # symbol mention always implies market_desk involvement
+        if symbol and (needs_market or not any([needs_book, needs_kyc, needs_notes])):
+            needs_market = True
 
         # If nothing matched specifically, default to book_qa (most common)
         if not any([needs_book, needs_kyc, needs_notes, needs_market]):

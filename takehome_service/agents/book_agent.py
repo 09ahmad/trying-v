@@ -120,6 +120,7 @@ class BookAgent:
                 id="valura-fast",
                 base_url=llm_base_url,
                 api_key=llm_api_key,
+                max_retries=3,
             ),
             name="ValuraBookQA",
             description=self.FAST_SYSTEM,
@@ -130,6 +131,7 @@ class BookAgent:
                 id="valura-deep",
                 base_url=llm_base_url,
                 api_key=llm_api_key,
+                max_retries=3,
             ),
             name="ValuraBookQADeep",
             description=self.DEEP_SYSTEM,
@@ -442,7 +444,7 @@ class BookAgent:
             prompt,
             use_deep,
         )
-        return self._build(answer_text, val_str, cited)
+        return self._build(answer_text, val_str, cited, client_id=client_id)
 
     def _symbol_holdings(self, client_id: str, symbol: str, prompt: str, use_deep: bool) -> Dict[str, Any]:
         _, cutoff = _parse_date_range(prompt)
@@ -543,7 +545,7 @@ class BookAgent:
         try:
             run_output = agent.run(msg)
             content = run_output.get_content_as_string() if run_output else ""
-            if not content or "STUB-GATEWAY" in content:
+            if not content or "STUB-GATEWAY" in content or "insufficient_quota" in content or "exceeded your current quota" in content or "rate limit" in content.lower():
                 return precomputed_answer
             numbers = re.findall(r"-?\d+(?:\.\d+)?", data_summary)
             if numbers:

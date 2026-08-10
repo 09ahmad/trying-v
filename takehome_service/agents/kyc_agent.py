@@ -35,6 +35,7 @@ class KYCProfileAgent:
                 id="valura-fast",
                 base_url=llm_base_url,
                 api_key=llm_api_key,
+                max_retries=3,
             ),
             name="ValuraKYCProfile",
             description=self.SYSTEM,
@@ -75,7 +76,7 @@ class KYCProfileAgent:
             return self._abstain("Risk profile is not recorded in the KYC data.")
 
         # --- KYC status ---
-        if re.search(r"\b(kyc\s+status|kyc\s+complete|verification\s+status|good\s+standing)\b", prompt_lower):
+        if re.search(r"\b(kyc\s+status|kyc\s+complete|verification\s+status|good\s+standing|kyc\s+standing|standing|kyc)\b", prompt_lower):
             status = kyc.get("kyc_status")
             notes = self._loader.get_notes(client_id)
             pending_note = next(
@@ -175,7 +176,7 @@ class KYCProfileAgent:
                 f"Rephrase the answer clearly. Do not change any values. Return only the answer."
             )
             content = run_output.get_content_as_string() if run_output else ""
-            if not content or "STUB-GATEWAY" in content:
+            if not content or "STUB-GATEWAY" in content or "insufficient_quota" in content or "exceeded your current quota" in content or "rate limit" in content.lower():
                 return precomputed
             return sanitize_text(content.strip())
         except Exception:

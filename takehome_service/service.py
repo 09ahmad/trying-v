@@ -18,6 +18,7 @@ Blackout handling:
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, List, Optional, Sequence
 
 from takehome_service.data import DataLoader, sanitize_text, format_citations
@@ -172,13 +173,16 @@ class AnswerService:
                 if f not in all_flags:
                     all_flags.append(f)
 
-        # Pick first non-null answer_value that is not a canary tag
+        # Pick answer_value: prioritize numeric or date values over arbitrary strings if multiple specialists contribute
         answer_value = None
         for r in good:
             v = r.get("answer_value")
             if v is not None and "VLR-" not in str(v):
-                answer_value = str(v)
-                break
+                v_str = str(v).strip()
+                if answer_value is None:
+                    answer_value = v_str
+                elif re.search(r"\d", v_str) and not re.search(r"\d", answer_value):
+                    answer_value = v_str
 
         conf = sum(float(r.get("confidence", 0.0)) for r in good) / max(1, len(good))
 

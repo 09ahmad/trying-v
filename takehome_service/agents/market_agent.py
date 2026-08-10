@@ -47,6 +47,7 @@ class MarketDeskAgent:
                 id="valura-fast",
                 base_url=llm_base_url,
                 api_key=llm_api_key,
+                max_retries=3,
             ),
             name="ValuraMarket",
             description=self.SYSTEM,
@@ -347,7 +348,7 @@ class MarketDeskAgent:
                 f"Rephrase clearly. Do not change values or add your own knowledge."
             )
             content = run_output.get_content_as_string() if run_output else ""
-            if not content or "STUB-GATEWAY" in content:
+            if not content or "STUB-GATEWAY" in content or "insufficient_quota" in content or "exceeded your current quota" in content or "rate limit" in content.lower():
                 return sanitize_text(precomputed)
             numbers = re.findall(r"-?\d+(?:\.\d+)?", precomputed)
             if numbers:
