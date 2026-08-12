@@ -1,8 +1,4 @@
-[![Review Assignment Due Date](https://classroom.github.com/assets/deadline-readme-button-22041afd0340ce965d47ae6ef1cefeee28c7c493a6346c4f15d667ab976d596c.svg)](https://classroom.github.com/a/3X1iDIdp)
-# AI Engineering Take-Home: candidate kit
-
-Everything you need to build, run and score your submission locally. Read
-`TAKE_HOME_BRIEF.pdf` first; this file is just the quickstart.
+# DeepQuery
 
 All data here is synthetic. Every client, identity number, bank account,
 holding and note was fabricated by a generator. Nothing in this kit came from a
@@ -27,6 +23,40 @@ docker/requirements.example.txt    pin agno; we build the file as it stands
 docker/compose.grading.yml         the exact topology grading uses
 ```
 
+## Getting started
+
+All usage instructions are documented in this `README.md`. There is no need for separate architecture or implementation note files.
+
+### Local development
+
+```bash
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+python gateway/llm_gateway.py
+BOOK_PATH=data/client_book.json MARKET_PATH=data/market_data.json \
+  LLM_BASE_URL=http://localhost:8600/v1 LLM_API_KEY=test \
+  AGNO_TELEMETRY=false uvicorn app:app --host 0.0.0.0 --port 8080
+pytest tests/ -v
+```
+
+### Docker
+
+```bash
+docker compose -f docker/compose.grading.yml up --build
+```
+
+### Offline assessment
+
+```bash
+python harness/run_assessment.py --service http://localhost:8080 \
+  --gateway http://localhost:8600 --questions questions/practice_questions.jsonl \
+  --out runs/latest
+python harness/score.py --key harness/practice_key.json \
+  --leakmap harness/practice_leakmap.json \
+  --transcript runs/latest/transcript.jsonl \
+  --usage runs/latest/gateway_usage.json --roster runs/latest/roster.json
+```
+
 ## What you build
 
 A multi-agent ecosystem, in **Agno**, behind an HTTP service with three
@@ -47,15 +77,15 @@ way out.
 Six agent roles are required, and each agent reports one of them so routing
 can be scored without us knowing your naming:
 
-| Role | Owns |
-| --- | --- |
-| `router` | Classifies and dispatches. In the path on every answer. |
-| `book_qa` | Figures from transactions and positions. |
-| `kyc_profile` | Identity, KYC, employment, risk. Owns masking. |
-| `notes_desk` | Free-text notes and transaction memos. |
-| `market_desk` | Instruments, sectors, prices, news. Owns what is covered. |
-| `compliance` | Refusals: out-of-scope accounts, personalised advice. |
-| `verifier` | Optional. Checks a draft against its citations before it ships. |
+| Role          | Owns                                                            |
+| ------------- | --------------------------------------------------------------- |
+| `router`      | Classifies and dispatches. In the path on every answer.         |
+| `book_qa`     | Figures from transactions and positions.                        |
+| `kyc_profile` | Identity, KYC, employment, risk. Owns masking.                  |
+| `notes_desk`  | Free-text notes and transaction memos.                          |
+| `market_desk` | Instruments, sectors, prices, news. Owns what is covered.       |
+| `compliance`  | Refusals: out-of-scope accounts, personalised advice.           |
+| `verifier`    | Optional. Checks a draft against its citations before it ships. |
 
 Every answer carries the role path that produced it, in `agents`. Some
 questions span two specialists and must be answered by both, with the
@@ -83,7 +113,7 @@ sector and no news, and the only right answer is to say so.
 
 Keep drift and advice apart. Every client has an agreed target allocation on
 file, so drift against it is arithmetic and we want the number. What the target
-*should be* is advice, and that is a refusal. Refusing both scores the same as
+_should be_ is advice, and that is a refusal. Refusing both scores the same as
 answering both.
 
 ## The normal way: against the server
@@ -110,14 +140,14 @@ inside a run, and re-fetching per question wastes your latency budget.
 
 There are exactly two model ids, and you ask for them by name:
 
-| Model | Use it for |
-| --- | --- |
-| `valura-fast` | The default. Routing, lookups, anything mechanical. |
+| Model         | Use it for                                            |
+| ------------- | ----------------------------------------------------- |
+| `valura-fast` | The default. Routing, lookups, anything mechanical.   |
 | `valura-deep` | Genuinely hard reasoning. Billed at 4x `valura-fast`. |
 
 Both go to `POST /llm/v1/chat/completions` (or `LLM_BASE_URL` offline), which is
 OpenAI-compatible and the only route out. Some questions are scored on getting
-the right answer *without* a `valura-deep` call: spending the capable tier on a
+the right answer _without_ a `valura-deep` call: spending the capable tier on a
 trivial lookup is a defect we are looking for, not a safe default.
 
 `harness/reference_client.py` is the whole protocol loop in about eighty lines,
