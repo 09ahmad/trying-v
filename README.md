@@ -237,6 +237,6 @@ different values, different questions, differently worded. Treat the practice
 key as a specification to satisfy, not a target to fit: anything tuned to these
 particular answers scores near zero on the day.
 
-## Please do not publish
+## Notes
 
-Not this kit, not the data, not your solution, to any public repository.
+This project uses synthetic data for local development and evaluation. It is intended for experimentation, testing, and portfolio-analysis workflows in a contained environment.
